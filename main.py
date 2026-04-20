@@ -1,0 +1,2358 @@
+import os
+import tempfile
+import zipfile
+import xml.etree.ElementTree as ET
+import re
+import shutil
+import uuid
+import traceback
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, UploadFile, File, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import List, Optional
+import database
+import uvicorn
+import requests
+from bs4 import BeautifulSoup
+import pdf_parser
+from pdf_parser import extract_data_from_pdf
+import io
+from xhtml2pdf import pisa
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import smtplib
+
+app = FastAPI(title="Invoice83 DEMO")
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+UPLOADS_DIR = Path("uploads")
+UPLOADS_DIR.mkdir(exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")# --- Demo: Enotno podjetje, fiksna baza ---
+@app.on_event("startup")
+def startup():
+    database.set_active_db("demo.db")
+    database.init_db()
+
+@app.get("/api/companies")
+def list_companies():
+    return {"active_id": "demo", "items": [{"id": "demo", "name": "Primer Tech d.o.o. (DEMO)", "db": "demo.db"}]}
+
+@app.post("/api/companies/switch/{company_id}")
+def switch_company(company_id: str):
+    return {"status": "success", "company": {"id": "demo", "name": "Primer Tech d.o.o. (DEMO)", "db": "demo.db"}}
+
+@app.post("/api/companies/create")
+def create_company(data: dict):
+    raise HTTPException(status_code=403, detail="Ustvarjanje podjetij ni dovoljeno v demo verziji.")
+
+@app.get("/")
+def read_root():
+    from fastapi.responses import HTMLResponse
+    try:
+        with open("static/index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except Exception as e:
+        return HTMLResponse(content=f"<html><body>Napaka: {str(e)}</body></html>")
+
+@app.get("/api/heartbeat")
+def heartbeat():
+    return {"ok": True}
+
+# --- Partnerji ---
+class Partner(BaseModel):
+    id: Optional[int] = None
+    naziv: str
+    ulica: Optional[str] = None
+    postna_stevilka: Optional[str] = None
+    kraj: Optional[str] = None
+    drzava: Optional[str] = None
+    davcna_stevilka: Optional[str] = None
+    zavezanec_za_ddv: Optional[bool] = False
+    trr: Optional[str] = None
+    telefon: Optional[str] = None
+    email: Optional[str] = None
+    vrsta: Optional[str] = "oba"
+
+class Nastavitve(BaseModel):
+    naziv: Optional[str] = ""
+    ulica: Optional[str] = ""
+    posta_kraj: Optional[str] = ""
+    drzava: Optional[str] = "Slovenija"
+    davcna_stevilka: Optional[str] = ""
+    zavezanec_za_ddv: Optional[bool] = False
+    trr: Optional[str] = ""
+    banka: Optional[str] = ""
+    email_posiljatelja: Optional[str] = "sim@83.si"
+    telefon: Optional[str] = ""
+    spletna_stran: Optional[str] = ""
+    kratko_ime: Optional[str] = ""
+    dvostavno_knjigovodstvo: Optional[bool] = False
+
+class PlaciloPovezava(BaseModel):
+    dokument_id: int
+    znesek: float
+
+class LikvidacijaRequest(BaseModel):
+    izpisek_postavka_id: int
+    povezave: List[PlaciloPovezava]
+
+class Konto(BaseModel):
+    id: Optional[int] = None
+    stevilka: str
+    naziv: str
+    opis: Optional[str] = ""
+
+# --- PRILOGE ---
+@app.post("/api/upload_priloga")
+async def upload_priloga(parent_type: str, parent_id: int, file: UploadFile = File(...)):
+    ext = Path(file.filename).suffix.lower()
+    allowed = {'.pdf', '.jpg', '.jpeg', '.png', '.txt', '.xml'}
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail=f"Format {ext} ni dovoljen. Dovoljeni: {', '.join(allowed)}")
+    
+    unique_name = f"{uuid.uuid4().hex}{ext}"
+    dest = UPLOADS_DIR / unique_name
+    
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO priloge (parent_type, parent_id, filename, original_name) VALUES (?, ?, ?, ?)",
+        (parent_type, parent_id, unique_name, file.filename)
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return {"id": new_id, "filename": unique_name, "original_name": file.filename, "url": f"/uploads/{unique_name}"}
+
+@app.get("/api/priloge/{parent_type}/{parent_id}")
+def get_priloge(parent_type: str, parent_id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, filename, original_name, uploaded_at FROM priloge WHERE parent_type=? AND parent_id=? ORDER BY uploaded_at",
+        (parent_type, parent_id)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [{**dict(r), "url": f"/uploads/{r['filename']}"} for r in rows]
+
+@app.delete("/api/priloge/{id}")
+def delete_priloga(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT filename FROM priloge WHERE id=?", (id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Priloga ni najdena.")
+    try:
+        (UPLOADS_DIR / row['filename']).unlink(missing_ok=True)
+    except Exception:
+        pass
+    cursor.execute("DELETE FROM priloge WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted"}
+
+@app.get("/api/partnerji")
+def get_partnerji():
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM partnerji ORDER BY naziv")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/partnerji")
+def create_partner(partner: Partner):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO partnerji (naziv, ulica, postna_stevilka, kraj, drzava, davcna_stevilka, zavezanec_za_ddv, trr, telefon, email, vrsta)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (partner.naziv, partner.ulica, partner.postna_stevilka, partner.kraj, partner.drzava, partner.davcna_stevilka, partner.zavezanec_za_ddv, partner.trr, partner.telefon, partner.email, partner.vrsta))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "id": cursor.lastrowid}
+
+@app.get("/api/partnerji/detajl/{id}")
+def get_partner_detajl(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM partnerji WHERE id = ?", (id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Partner ni najden")
+    return dict(row)
+
+@app.put("/api/partnerji/{id}")
+def update_partner(id: int, partner: Partner):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE partnerji 
+        SET naziv=?, ulica=?, postna_stevilka=?, kraj=?, drzava=?, davcna_stevilka=?, zavezanec_za_ddv=?, trr=?, telefon=?, email=?, vrsta=?
+        WHERE id = ?
+    """, (partner.naziv, partner.ulica, partner.postna_stevilka, partner.kraj, partner.drzava, partner.davcna_stevilka, partner.zavezanec_za_ddv, partner.trr, partner.telefon, partner.email, partner.vrsta, id))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.get("/api/partnerji/search")
+def search_partnerji(q: str):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    # PreiÅ¡Äemo naziv, davÄno Å¡tevilko in ulico
+    query = "%" + q + "%"
+    cursor.execute("""
+        SELECT * FROM partnerji 
+        WHERE naziv LIKE ? OR davcna_stevilka LIKE ? OR ulica LIKE ?
+        ORDER BY naziv LIMIT 20
+    """, (query, query, query))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.delete("/api/partnerji/{id}")
+def delete_partner(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    
+    # Preveri, Äe ima partner vezane dokumente
+    cursor.execute("SELECT COUNT(*) as cnt FROM dokumenti WHERE partner_id = ?", (id,))
+    if cursor.fetchone()['cnt'] > 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Partnerja ni mogoÄe brisati, ker ima vezane dokumente.")
+    
+    # Preveri, Äe ima partner vezane banÄne izpiske
+    cursor.execute("SELECT COUNT(*) as cnt FROM izpiski_postavke WHERE partner_id = ?", (id,))
+    if cursor.fetchone()['cnt'] > 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Partnerja ni mogoÄe brisati, ker ima vezane banÄne izpiske.")
+        
+    cursor.execute("DELETE FROM partnerji WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+
+# --- Bizi.si pomoÅ¾ne funkcije (notranje) ---
+def _bizi_search(q: str):
+    """PoiÅ¡Äe podjetje na Bizi.si in vrne seznam zadetkov."""
+    url = f"https://www.bizi.si/iskanje?q={q}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, 'html.parser')
+        results = []
+        rows = soup.select(".b-table-row")
+        for row in rows:
+            name_el = row.select_one(".b-link-company")
+            if not name_el: continue
+            cols = row.select(".col")
+            if len(cols) < 6: continue
+            name = name_el.get_text(strip=True)
+            href = name_el['href'] if name_el.has_attr('href') else ""
+            link = href if href.startswith("http") else "https://www.bizi.si" + href
+            naslov_el = row.select_one('a[href*="openMapTis"]') or cols[2].select_one('a')
+            naslov = naslov_el.get_text(strip=True) if naslov_el else cols[2].get_text(strip=True)
+            posta_kraj = cols[3].get_text(strip=True)
+            davcna_raw = cols[5].get_text(strip=True)
+            is_zavezanec = "SI" in davcna_raw
+            davcna = davcna_raw.replace("SI", "").strip()
+            results.append({
+                "naziv": name, "naslov": naslov, "posta_kraj": posta_kraj,
+                "davcna_stevilka": davcna, "zavezanec_za_ddv": is_zavezanec, "link": link
+            })
+        return results
+    except:
+        return []
+
+def _bizi_detail_full(url: str):
+    """Pridobi podrobne kontaktne podatke in TRR podjetja z Bizi.si."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, 'html.parser')
+        phone_el = soup.select_one("a.i-ostalo-telefon")
+        phone = phone_el.get_text(strip=True) if phone_el else ""
+        email_el = soup.select_one("#ctl00_ctl00_cphMain_CompanyDetailsTitleBasic1_aMail")
+        email = email_el.get_text(strip=True) if email_el else ""
+        zavezanec = False
+        for label in soup.select(".b-attr-name, .b-attr-label"):
+            if "Zavezanec za DDV" in label.get_text(strip=True):
+                v = label.find_next_sibling("div", class_="b-attr-value")
+                if v and "Da" in v.get_text(): zavezanec = True
+                break
+        trr = ""
+        try:
+            r_trr = requests.get(url.rstrip('/') + "/trr-in-blokade/", headers=headers, timeout=5)
+            if r_trr.ok:
+                soup_trr = BeautifulSoup(r_trr.text, 'html.parser')
+                trr_el = soup_trr.select_one("div.b-attr-value-item-trr span.b-attr-value:not(.b-text-line-through)")
+                if trr_el: trr = trr_el.get_text(strip=True).replace("IBAN", "").strip()
+        except: pass
+        return {"telefon": phone, "email": email, "zavezanec_za_ddv": zavezanec, "trr": trr}
+    except:
+        return {"telefon": "", "email": "", "zavezanec_za_ddv": False, "trr": ""}
+
+@app.get("/api/partnerji/search_bizi")
+def search_bizi(q: str):
+    url = f"https://www.bizi.si/iskanje?q={q}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, 'html.parser')
+        
+        results = []
+        rows = soup.select(".b-table-row")
+        
+        for row in rows:
+            name_el = row.select_one(".b-link-company")
+            if not name_el: continue
+            
+            cols = row.select(".col")
+            if len(cols) < 6: continue
+            
+            name = name_el.get_text(strip=True)
+            href = name_el['href'] if name_el.has_attr('href') else ""
+            link = href if href.startswith("http") else "https://www.bizi.si" + href
+            
+            # Address is typically in 3rd col (index 2)
+            naslov = ""
+            naslov_el = row.select_one('a[href*="openMapTis"]')
+            if not naslov_el:
+                naslov_el = cols[2].select_one('a')
+            
+            if naslov_el:
+                naslov = naslov_el.get_text(strip=True)
+            else:
+                naslov = cols[2].get_text(strip=True)
+                
+            posta_kraj = cols[3].get_text(strip=True)
+            davcna_raw = cols[5].get_text(strip=True)
+            is_zavezanec = "SI" in davcna_raw
+            davcna = davcna_raw.replace("SI", "").strip()
+            
+            results.append({
+                "naziv": name,
+                "naslov": naslov,
+                "posta_kraj": posta_kraj,
+                "davcna_stevilka": davcna,
+                "zavezanec_za_ddv": is_zavezanec,
+                "link": link
+            })
+            
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Napaka pri iskanju na Bizi.si: {str(e)}")
+
+@app.get("/api/partnerji/bizi_detail")
+def bizi_detail(url: str):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # Phone
+        phone_el = soup.select_one("a.i-ostalo-telefon")
+        phone = phone_el.get_text(strip=True) if phone_el else ""
+        
+        # Email
+        email_el = soup.select_one("#ctl00_ctl00_cphMain_CompanyDetailsTitleBasic1_aMail")
+        email = email_el.get_text(strip=True) if email_el else ""
+        
+        # Tax Payer Status
+        zavezanec = False
+        labels = soup.select(".b-attr-name, .b-attr-label")
+        for label in labels:
+            text = label.get_text(strip=True)
+            if "Zavezanec za DDV" in text:
+                value_el = label.find_next_sibling("div", class_="b-attr-value")
+                if value_el and "Da" in value_el.get_text():
+                    zavezanec = True
+                break
+        
+        # TRR (IBAN) - Fetch from trr-in-blokade subpage
+        trr = ""
+        try:
+            trr_url = url.rstrip('/') + "/trr-in-blokade/"
+            r_trr = requests.get(trr_url, headers=headers, timeout=5)
+            if r_trr.ok:
+                soup_trr = BeautifulSoup(r_trr.text, 'html.parser')
+                trr_el = soup_trr.select_one("div.b-attr-value-item-trr span.b-attr-value:not(.b-text-line-through)")
+                if trr_el:
+                    trr = trr_el.get_text(strip=True).replace("IBAN", "").strip()
+        except: pass
+
+        return {"telefon": phone, "email": email, "zavezanec_za_ddv": zavezanec, "trr": trr}
+    except Exception as e:
+        return {"telefon": "", "email": "", "zavezanec_za_ddv": False, "trr": "", "error": str(e)}
+
+# --- Nastavitve ---
+@app.get("/api/nastavitve")
+def get_nastavitve():
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM nastavitve WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+@app.post("/api/nastavitve")
+@app.put("/api/nastavitve")
+def save_nastavitve(n: Nastavitve):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE nastavitve SET 
+            naziv=?, ulica=?, posta_kraj=?, drzava=?, davcna_stevilka=?, 
+            zavezanec_za_ddv=?, trr=?, banka=?, email_posiljatelja=?, telefon=?, spletna_stran=?,
+            kratko_ime=?, dvostavno_knjigovodstvo=?
+        WHERE id = 1
+    """, (n.naziv, n.ulica, n.posta_kraj, n.drzava, n.davcna_stevilka, 
+          n.zavezanec_za_ddv, n.trr, n.banka, n.email_posiljatelja, n.telefon, n.spletna_stran,
+          n.kratko_ime, n.dvostavno_knjigovodstvo))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+# --- Kontni naÄ rt ---
+@app.get("/api/konti")
+def get_konti():
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM kontni_nacrt ORDER BY stevilka")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/konti")
+def create_konto(k: Konto):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO kontni_nacrt (stevilka, naziv, opis) VALUES (?, ?, ?)", (k.stevilka, k.naziv, k.opis))
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Napaka pri dodajanju konta: {str(e)}")
+    conn.close()
+    return {"status": "success", "id": cursor.lastrowid}
+
+@app.put("/api/konti/{id}")
+def update_konto(id: int, k: Konto):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE kontni_nacrt SET stevilka=?, naziv=?, opis=? WHERE id = ?", (k.stevilka, k.naziv, k.opis, id))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+# --- LIKVIDACIJA (Povezovanje plaÄil) ---
+@app.get("/api/likvidacija/odprte_postavke/{partner_id}")
+def get_odprte_postavke(partner_id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    # PoiÅ¡Äemo vse raÄune (izdane in prejete), ki niso popolnoma plaÄani
+    # RaÄunamo preostanek: znesek_skupaj - vsota vseh povezav v placila_povezave
+    cursor.execute("""
+        SELECT d.id, d.tip, d.stevilka, d.datum_izdaje, d.datum_zapadlosti, d.znesek_skupaj, d.status,
+        IFNULL((SELECT SUM(znesek) FROM placila_povezave WHERE dokument_id = d.id), 0) as placano_znesek
+        FROM dokumenti d
+        WHERE d.partner_id = ? AND d.tip IN ('izdani_racuni', 'prejeti_racuni', 'dobropisi')
+        AND (d.status != 'plaÄano' OR d.status IS NULL)
+        ORDER BY d.datum_zapadlosti ASC
+    """, (partner_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['preostanek'] = round(d['znesek_skupaj'] - d['placano_znesek'], 2)
+        if d['preostanek'] > 0:
+            result.append(d)
+    return result
+
+@app.get("/api/likvidacija/povezave/{izpisek_postavka_id}")
+def get_povezave_postavke(izpisek_postavka_id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT pp.*, d.stevilka, d.tip, d.datum_izdaje
+        FROM placila_povezave pp
+        JOIN dokumenti d ON pp.dokument_id = d.id
+        WHERE pp.izpisek_postavka_id = ?
+    """, (izpisek_postavka_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/likvidacija/povezi")
+def povezi_placilo(req: LikvidacijaRequest):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    try:
+        # 1. PobriÅ¡emo obstojeÄe povezave za to postavko (Äe obstajajo)
+        # Najprej dobimo id-je dokumentov, ki so bili vkljuÄeni, da jim kasneje posodobimo status
+        cursor.execute("SELECT dokument_id FROM placila_povezave WHERE izpisek_postavka_id = ?", (req.izpisek_postavka_id,))
+        old_doc_ids = [r['dokument_id'] for r in cursor.fetchall()]
+        
+        cursor.execute("DELETE FROM placila_povezave WHERE izpisek_postavka_id = ?", (req.izpisek_postavka_id,))
+        
+        # 2. Vstavimo nove povezave
+        new_doc_ids = []
+        for p in req.povezave:
+            if p.znesek > 0:
+                cursor.execute("""
+                    INSERT INTO placila_povezave (izpisek_postavka_id, dokument_id, znesek)
+                    VALUES (?, ?, ?)
+                """, (req.izpisek_postavka_id, p.dokument_id, p.znesek))
+                new_doc_ids.append(p.dokument_id)
+        
+        # 3. Posodobitev statusov vseh vpletenih dokumentov (starih in novih)
+        all_affected = list(set(old_doc_ids + new_doc_ids))
+        for doc_id in all_affected:
+            # IzraÄunamo skupno plaÄano vrednost za ta dokument
+            cursor.execute("SELECT SUM(znesek) as skupaj_placano FROM placila_povezave WHERE dokument_id = ?", (doc_id,))
+            placano = cursor.fetchone()['skupaj_placano'] or 0
+            
+            cursor.execute("SELECT znesek_skupaj FROM dokumenti WHERE id = ?", (doc_id,))
+            skupaj = cursor.fetchone()['znesek_skupaj']
+            
+            status = 'neplaÄano'
+            if placano >= skupaj - 0.001: # Toleranca za decimalke
+                status = 'plaÄano'
+            elif placano > 0:
+                status = 'delno plaÄano'
+            
+            cursor.execute("UPDATE dokumenti SET status = ? WHERE id = ?", (status, doc_id))
+            
+        conn.commit()
+        conn.close()
+        return {"status": "success"}
+    except Exception as e:
+        if 'conn' in locals(): conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+@app.delete("/api/konti/{id}")
+def delete_konto(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM kontni_nacrt WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/nastavitve/logo")
+async def upload_logo(file: UploadFile = File(...)):
+    # Shranimo logotip v static mapo
+    try:
+        content = await file.read()
+        import os
+        if not os.path.exists("static/uploads"):
+            os.makedirs("static/uploads")
+        
+        # Podpiramo samo pogoste formate
+        ext = file.filename.split('.')[-1].lower()
+        if ext not in ['png', 'jpg', 'jpeg', 'gif']:
+            raise HTTPException(status_code=400, detail="Nepodprt format slike.")
+            
+        file_path = f"static/uploads/logo.{ext}"
+        with open(file_path, "wb") as f:
+            f.write(content)
+            
+        return {"status": "success", "path": f"/static/uploads/logo.{ext}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def izracunaj_kontrolno_stevilko(stevilka_str):
+    """
+    IzraÄun kontrolne Å¡tevilke po modulu 97 (ISO 7064 MOD 97-10).
+    Uporablja se za slovenske sklice SI12.
+    """
+    # Odstrani vse ne-Å¡tevilÄne znake
+    s = "".join(filter(str.isdigit, stevilka_str))
+    if not s:
+        return "00"
+    
+    # Å tevilka mora biti dolga do 13 mest
+    s = s[:13]
+    # IzraÄun: 98 - (Å¡tevilka * 100 % 97)
+    try:
+        n = int(s)
+        res = (n * 100) % 97
+        k = 98 - res
+        return f"{k:02d}"
+    except:
+        return "00"
+
+def format_money(val):
+    if val is None: val = 0.0
+    return f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") + " â‚¬"
+
+# --- PDF GENERATOR (fpdf2) ---
+def generate_pdf_invoice(invoice_data, company_data, partner_data, items):
+    from fpdf import FPDF
+    import os
+    import tempfile
+    import qrcode
+
+    class PDF(FPDF):
+        def header(self):
+            # Iskanje logotipa - preverimo vse moÅ¾ne konÄnice
+            logo_path = None
+            for ext in ['png', 'jpg', 'jpeg', 'PNG', 'JPG', 'JPEG']:
+                p = f"static/uploads/logo.{ext}"
+                if os.path.exists(p):
+                    logo_path = p
+                    break
+            
+            if logo_path:
+                # ÄŒe logotip obstaja, nariÅ¡emo samo sliko
+                self.image(logo_path, 10, 8, 40)
+            else:
+                # ÄŒe logotipa ni, izriÅ¡emo tekstovni logotip
+                self.set_font('DejaVu', 'B', 24)
+                self.set_text_color(0, 0, 0)
+                self.cell(15, 10, 'SIM', ln=0)
+                self.set_text_color(230, 0, 0)
+                self.cell(15, 10, '83', ln=0)
+            
+            self.set_draw_color(0, 74, 153)
+            self.set_line_width(0.5)
+            self.line(10, 30, 200, 30)
+            
+            # PREPREÄŒEVANJE PREKRIVANJA: premaknemo kazalec pod Ärto!
+            self.set_y(35)
+
+
+    pdf = PDF()
+    # Registracija fonta DejaVu
+    pdf.add_font('DejaVu', '', 'DejaVuSans.ttf')
+    pdf.add_font('DejaVu', 'B', 'DejaVuSans-Bold.ttf')
+    pdf.add_font('DejaVu', 'I', 'DejaVuSans.ttf')
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    
+    # Naslov raÄuna (Desno poravnano, veÄji font)
+    title = "RAÄŒUN Å¡t."
+    if invoice_data.get('tip') == 'ponudba' or invoice_data.get('tip') == 'ponudbe':
+        title = "PONUDBA Å¡t."
+    elif invoice_data.get('tip') == 'dobropis' or invoice_data.get('tip') == 'dobropisi':
+        title = "DOBROPIS Å¡t."
+        
+    pdf.set_font('DejaVu', 'B', 16)
+    pdf.set_text_color(25, 42, 86) # Temno modra
+    pdf.cell(0, 10, f"{title} {invoice_data.get('stevilka', '')}", ln=1, align='R')
+    pdf.set_text_color(0, 0, 0)
+    
+    def f_date(d):
+        if not d: return d
+        parts = d.split('-')
+        if len(parts) == 3: return f"{parts[2]}.{parts[1]}.{parts[0]}"
+        return d
+
+
+    # PoÅ¡iljatelj (Levo)
+    pdf.set_xy(10, 45)
+    pdf.set_font('DejaVu', 'B', 10)
+    pdf.cell(90, 5, 'IZDAJATELJ:', ln=1)
+    pdf.set_font('DejaVu', '', 9)
+    pdf.cell(90, 4, company_data.get('naziv', ''), ln=1)
+    pdf.cell(90, 4, company_data.get('ulica', ''), ln=1)
+    pdf.cell(90, 4, company_data.get('posta_kraj', ''), ln=1)
+    pdf.cell(90, 4, f"DavÄna Å¡t.: {company_data.get('davcna_stevilka', '')}", ln=1)
+    if company_data.get('trr'):
+        pdf.cell(90, 4, f"TRR: {company_data.get('trr', '')}", ln=1)
+
+    # Prejemnik (Desno)
+    pdf.set_xy(110, 45)
+    pdf.set_font('DejaVu', 'B', 10)
+    pdf.cell(90, 5, 'PREJEMNIK:', ln=1)
+    pdf.set_font('DejaVu', '', 9)
+    pdf.set_xy(110, 50)
+    pdf.multi_cell(90, 4, f"{partner_data.get('naziv', '')}\n{partner_data.get('ulica', '')}\n{partner_data.get('postna_stevilka', '')} {partner_data.get('kraj', '')}\n{partner_data.get('drzava', 'Slovenija')}\nDavÄna Å¡t.: {partner_data.get('davcna_stevilka', '')}")
+
+    # Datumi - pod prejemnikom, desno (ne prekrivajo s prejem. blokom)
+    d_od = invoice_data.get('datum_storitve_od', '')
+    d_do = invoice_data.get('datum_storitve_do', '')
+    dates_y = pdf.get_y() + 2
+    pdf.set_font('DejaVu', '', 8)
+    pdf.set_text_color(80, 80, 80)
+    pdf.set_xy(110, dates_y); pdf.cell(90, 4, f"Datum izdaje: {invoice_data.get('datum_izdaje', '')}", align='R'); dates_y += 4
+    pdf.set_xy(110, dates_y); pdf.cell(90, 4, f"Datum zapadlosti: {invoice_data.get('datum_zapadlosti', '')}", align='R'); dates_y += 4
+    if d_od and d_do:
+        pdf.set_xy(110, dates_y); pdf.cell(90, 4, f"Obdobje storitve: {f_date(d_od)} - {f_date(d_do)}", align='R')
+    elif d_od:
+        pdf.set_xy(110, dates_y); pdf.cell(90, 4, f"Datum storitve: {f_date(d_od)}", align='R')
+    pdf.set_text_color(0, 0, 0)
+
+    pdf.set_y(95)
+    
+    # Tabela postavk
+    pdf.set_fill_color(230, 230, 230)
+    pdf.set_font('DejaVu', 'B', 9)
+    # Header cells
+    # Header cells - Adjusted widths to fit Discount
+    pdf.cell(85, 8, 'Opis storitve/izdelka', 1, 0, 'L', True)
+    pdf.cell(15, 8, 'Kol.', 1, 0, 'C', True)
+    pdf.cell(25, 8, 'Cena/en.', 1, 0, 'R', True)
+    pdf.cell(15, 8, 'Pop.%', 1, 0, 'C', True)
+    pdf.cell(20, 8, 'DDV%', 1, 0, 'C', True)
+    pdf.cell(30, 8, 'Znesek', 1, 1, 'R', True)
+    
+    pdf.set_font('DejaVu', '', 9)
+    for it in items:
+        x = pdf.get_x()
+        y = pdf.get_y()
+        
+        desc = it.get('opis', '')
+        pdf.multi_cell(85, 6, desc, border=1)
+        new_y = pdf.get_y()
+        row_h = new_y - y
+        
+        # Zapolnimo ostala polja v isti vrstici
+        pdf.set_xy(x + 85, y)
+        pdf.cell(15, row_h, str(it.get('kolicina', 1)), 1, 0, 'C')
+        pdf.cell(25, row_h, format_money(it.get('cena_enote', 0)), 1, 0, 'R')
+        pdf.cell(15, row_h, f"{it.get('popust', 0)}%", 1, 0, 'C')
+        pdf.cell(20, row_h, f"{it.get('stopnja_ddv', 22)}%", 1, 0, 'C')
+        pdf.cell(30, row_h, format_money(it.get('znesek_skupaj', 0)), 1, 1, 'R')
+        
+    pdf.ln(5)
+    
+    # Celotni znesek (na desni)
+    pdf.set_font('DejaVu', '', 10)
+    pdf.cell(160, 6, 'Skupaj brez DDV:', 0, 0, 'R')
+    pdf.cell(30, 6, format_money(invoice_data.get('znesek_brez_ddv', 0)), 0, 1, 'R')
+    pdf.cell(160, 6, 'DDV (22%):', 0, 0, 'R')
+    pdf.cell(30, 6, format_money(invoice_data.get('znesek_ddv', 0)), 0, 1, 'R')
+    
+    pdf.ln(2)
+    pdf.set_font('DejaVu', 'B', 12)
+    pdf.set_draw_color(25, 42, 86)
+    pdf.set_line_width(0.5)
+    pdf.cell(140, 10, 'SKUPAJ ZA PLAÄŒILO:', 'T B', 0, 'R')
+    pdf.set_text_color(200, 0, 0) # RdeÄa za poudarek zneska
+    pdf.cell(50, 10, format_money(invoice_data.get('znesek_skupaj', 0)), 'T B', 1, 'R')
+    pdf.set_text_color(0, 0, 0)
+    
+    zb = invoice_data.get('zakljucno_besedilo', '')
+    if zb and zb.strip():
+        pdf.ln(8)
+        pdf.set_font('DejaVu', 'I', 9)
+        pdf.multi_cell(0, 5, zb.strip())
+
+    noga = invoice_data.get('noga_dokumenta', '')
+    if noga and noga.strip():
+        pdf.ln(5)
+        pdf.set_font('DejaVu', '', 8)
+        pdf.set_text_color(50, 50, 50)
+        pdf.multi_cell(0, 4, noga.strip())
+
+    # Posebna opomba za ne-zavezance (Äe niso zavezanci za DDV)
+    legal_note = "DDV ni obraÄunan na podlagi 1. odstavka 94. Älena ZDDV-1"
+    if not company_data.get('zavezanec_za_ddv', False):
+        if legal_note not in zb and legal_note not in noga:
+            pdf.ln(5)
+            pdf.set_font('DejaVu', 'I', 8)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(0, 5, legal_note, ln=1, align='L')
+
+    # Footer
+    pdf.ln(10)
+    pdf.set_font('DejaVu', '', 8)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 4, 'Hvala za vaÅ¡e zaupanje.', ln=1)
+    pdf.ln(2)
+    pdf.set_font('DejaVu', 'B', 8)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 4, 'PlaÄilni podatki:', ln=1)
+    pdf.set_font('DejaVu', '', 8)
+    pdf.cell(0, 4, f"IBAN: {company_data.get('trr', '')}", ln=1)
+    pdf.cell(0, 4, f"Banka: {company_data.get('banka', '')}", ln=1)
+    
+    # SI12 in QR koda
+    raw_num = "".join(filter(str.isdigit, invoice_data.get('stevilka', '')))
+    # Zagotovimo, da imamo vsaj Å¡tevilko leta in zaporedno Å¡tevilko
+    kontrolna = izracunaj_kontrolno_stevilko(raw_num)
+    sklic_poln = f"{raw_num}{kontrolna}"
+    pdf.cell(0, 4, f"Pri plaÄilu uporabite referenco plaÄila: SI12 {sklic_poln}", ln=1)
+    
+    # UPN-QR generiranje (Uradni slovenski standard ZBS)
+    # 1. Vodilni slog: UPNQR
+    # 2-8. PlaÄnik (prazno razen imena/naslova)
+    # 9. Znesek (11 mest, centi)
+    # 10. Datum plaÄila (DD.MM.YYYY, neobvezno)
+    # 11. Nujno (prazno)
+    # 12. Koda namena (OTHR)
+    # 13. Namen plaÄila (42 znakov)
+    # 14. Rok plaÄila (DD.MM.YYYY)
+    # 15. IBAN prejemnika
+    # 16. Reference prejemnika (SI12 + stevilka + kontrolna)
+    # 17. Ime prejemnika
+    # 18. Naslov prejemnika
+    # 19. Kraj prejemnika
+    # 20. Kontrolna vsota (strlen(1..19) + 19)
+    
+    iban = company_data.get('trr', '').replace(' ', '')
+    cents = int(round(invoice_data.get('znesek_skupaj', 0) * 100))
+    amount_str = f"{cents:011d}"
+    
+    # Podatki prejemnika (naÅ¡e podjetje) - omejimo na 42 znakov
+    p_name = company_data.get('naziv', '')[:42]
+    p_address = company_data.get('ulica', '')[:42]
+    p_city = company_data.get('posta_kraj', '')[:42]
+    
+    # Podatki plaÄnika (partner) - omejimo na 42 znakov
+    c_name = partner_data.get('naziv', '')[:42]
+    c_address = partner_data.get('ulica', '')[:42]
+    c_city = f"{partner_data.get('postna_stevilka', '')} {partner_data.get('kraj', '')}"[:42]
+    
+    # Sestavimo prvih 19 polj po vrstnem redu ZBS standarda
+    vsebina_qr = [
+        "UPNQR",            # 1. Glava
+        "",                 # 2. IBAN plaÄnika
+        "",                 # 3. Polog
+        "",                 # 4. Dvig
+        "",                 # 5. Referenca plaÄnika
+        c_name,             # 6. Ime plaÄnika
+        c_address,          # 7. Naslov plaÄnika
+        c_city,             # 8. Kraj plaÄnika
+        amount_str,         # 9. Znesek
+        "",                 # 10. Datum plaÄila
+        "",                 # 11. Nujno
+        "OTHR",             # 12. Koda namena
+        f"Placilo racuna {invoice_data.get('stevilka', '')}"[:42], # 13. Namen
+        ".".join(invoice_data.get('datum_zapadlosti', '').split('-')[::-1]) if invoice_data.get('datum_zapadlosti') else "", # 14. Rok plaÄila (DD.MM.YYYY)
+        iban,               # 15. IBAN prejemnika
+        f"SI12{sklic_poln}", # 16. Referenca prejemnika
+        p_name,             # 17. Ime prejemnika
+        p_address,          # 18. Naslov prejemnika
+        p_city              # 19. Kraj prejemnika
+    ]
+    
+    # IzraÄun kontrolne vsote (polje 20) po ZBS standardu:
+    # Vsota dolÅ¾in v BAJTIH (ISO-8859-2) prvih 19 polj + 19 loÄil (LF)
+    # Rezultat mora biti 3-mestno Å¡tevilo z vodilnimi niÄlami.
+    vsota_dolzin = sum(len(f.encode('iso-8859-2', errors='replace')) for f in vsebina_qr)
+    kontrolna_vsota = vsota_dolzin + 19
+    
+    # Dodamo 20. polje (kontrolna vsota, 3 mesta z vodilnimi niÄlami)
+    vsebina_qr.append(f"{kontrolna_vsota:03d}")
+    
+    # ZDRUÅ½IMO Z \n (ASCII 10) in ENKODIRAMO V ISO-8859-2
+    qr_data_string = "\n".join(vsebina_qr)
+    qr_data_bytes = qr_data_string.encode('iso-8859-2', errors='replace')
+    
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(qr_data_bytes)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Shrani v zaÄasno datoteko
+    fd, temp_path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    img.save(temp_path)
+    
+    # Izris QR kode na sredino (X=85 za 40x40 sliko)
+    pdf.ln(5)
+    pdf.image(temp_path, x=85, w=40)
+    
+    # Brisanje zaÄasne QA slike
+    try:
+        os.remove(temp_path)
+    except:
+        pass
+    
+    return pdf.output()
+
+def ustvari_in_pripni_pdf(doc_id: int):
+    """
+    Interna funkcija, ki generira PDF za podan dokument_id in ga shrani med priloge.
+    PrepiÅ¡e obstojeÄi PDF, Äe Å¾e obstaja.
+    """
+    try:
+        conn = database.get_db()
+        cursor = conn.cursor()
+        
+        # Pridobivanje podatkov o dokumentu
+        cursor.execute("SELECT * FROM dokumenti WHERE id = ?", (doc_id,))
+        doc = cursor.fetchone()
+        if not doc:
+            conn.close()
+            return
+        
+        # Pridobivanje podatkov o podjetju
+        cursor.execute("SELECT * FROM nastavitve LIMIT 1")
+        company = cursor.fetchone()
+        if not company:
+            company = {}
+        
+        # Pridobivanje podatkov o partnerju
+        cursor.execute("SELECT * FROM partnerji WHERE id = ?", (doc['partner_id'],))
+        partner = cursor.fetchone()
+        if not partner:
+            partner = {}
+            
+        # Pridobivanje postavk
+        cursor.execute("SELECT * FROM dokumenti_postavke WHERE dokument_id = ?", (doc_id,))
+        items = [dict(i) for i in cursor.fetchall()]
+
+        # Generiranje PDF-ja
+        pdf_bytes = generate_pdf_invoice(dict(doc), dict(company), dict(partner), items)
+        
+        # Shranjevanje v datoteko - uporabimo predvidljivo ime za samodejni PDF
+        st_safe = str(doc['stevilka']).replace('/', '_').replace('\\', '_').replace(' ', '_')
+        disk_filename = f"auto_{doc_id}_{st_safe}.pdf"
+        filepath = UPLOADS_DIR / disk_filename
+        
+        with open(filepath, "wb") as f:
+            f.write(pdf_bytes)
+            
+        # Posodobitev tabele priloge
+        # Preverimo po filename, ker je ta unikaten za naÅ¡ avtomatski PDF tega dokumenta
+        cursor.execute("SELECT id FROM priloge WHERE parent_type = 'dokumenti' AND parent_id = ? AND filename = ?", (doc_id, disk_filename))
+        existing = cursor.fetchone()
+        
+        if not existing:
+            original_display_name = f"RaÄun_{doc['stevilka']}.pdf"
+            if doc['tip'] == 'ponudbe': original_display_name = f"Ponudba_{doc['stevilka']}.pdf"
+            if doc['tip'] == 'dobropisi': original_display_name = f"Dobropis_{doc['stevilka']}.pdf"
+            
+            cursor.execute("""
+                INSERT INTO priloge (parent_type, parent_id, filename, original_name)
+                VALUES (?, ?, ?, ?)
+            """, ('dokumenti', doc_id, disk_filename, original_display_name))
+        
+        conn.commit()
+        conn.close()
+    except Exception:
+        print("KRITIÄŒNA NAPAKA pri samodejnem generiranju PDF priloge:")
+        traceback.print_exc()
+        if 'conn' in locals(): conn.close()
+
+@app.get("/api/dokumenti/pdf/{id}")
+def get_pdf_invoice(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    
+    # Get invoice
+    cursor.execute("SELECT * FROM dokumenti WHERE id = ?", (id,))
+    inv = cursor.fetchone()
+    if not inv:
+        conn.close()
+        return {"error": "Ni najdeno"}
+    
+    # Get partner
+    cursor.execute("SELECT * FROM partnerji WHERE id = ?", (inv['partner_id'],))
+    partner = cursor.fetchone()
+    if not partner:
+        partner = {"naziv": "Neznan partner", "ulica": "", "posta_kraj": "", "drzava": "", "davcna_stevilka": ""}
+    
+    # Get items
+    cursor.execute("SELECT * FROM dokumenti_postavke WHERE dokument_id = ?", (id,))
+    items = [dict(r) for r in cursor.fetchall()]
+    
+    # Get company settings
+    cursor.execute("SELECT * FROM nastavitve WHERE id = 1")
+    company = cursor.fetchone()
+    conn.close()
+    
+    pdf_content = generate_pdf_invoice(dict(inv), dict(company), dict(partner), items)
+    
+    
+    doc_title = "Racun"
+    if inv['tip'] == 'ponudbe':
+        doc_title = "Ponudba"
+    elif inv['tip'] == 'dobropisi':
+        doc_title = "Dobropis"
+        
+    return Response(content=pdf_content, media_type="application/pdf", headers={
+        "Content-Disposition": f"attachment; filename={doc_title}_{inv['stevilka']}.pdf"
+    })
+
+@app.post("/api/dokumenti/send_email/{id}")
+def send_email_invoice(id: int):
+    return {"status": "success", "message": "E-poÅ¡ta bi bila poslana, Äe bi imeli SMTP streÅ¾nik."}
+
+def parse_eslog_xml(xml_data):
+    """
+    Parsira e-SLOG XML na naÄin, ki ignorira namespace (Namespace-Agnostic).
+    Podpira UBL, e-Slog 1.6 in EDI-XML (Telemach).
+    """
+    if xml_data.startswith(b'\xef\xbb\xbf'):
+        xml_data = xml_data[3:]
+        
+    root = ET.fromstring(xml_data)
+    
+    def get_tag(el):
+        return el.tag.split('}')[-1]
+
+    def find_all(tag_name, root_el=root):
+        """PoiÅ¡Äe vse elemente z doloÄenim imenom taga, ne glede na namespace."""
+        res = []
+        for el in root_el.iter():
+            if get_tag(el) == tag_name:
+                res.append(el)
+        return res
+
+    def find_one(tag_name, root_el=root):
+        """PoiÅ¡Äe prvi element z doloÄenim imenom taga."""
+        for el in root_el.iter():
+            if get_tag(el) == tag_name:
+                return el
+        return None
+
+    def find_path_val(path_list, root_el=root):
+        """PreiÅ¡Äe veÄ moÅ¾nih imen tagov in vrne vrednost prvega najdenega."""
+        for name in path_list:
+            el = find_one(name, root_el)
+            if el is not None and el.text:
+                return el.text.strip()
+        return ""
+
+    def find_edi_val(segment_tag, qual_tag, qual_val, value_tag, root_el=root):
+        """PoiÅ¡Äe EDIFACT segment (npr. S_DTM), preveri kvalifikator in vrne vrednost."""
+        segments = find_all(segment_tag, root_el)
+        for seg in segments:
+            q_el = find_one(qual_tag, seg)
+            if q_el is not None and q_el.text == qual_val:
+                v_el = find_one(value_tag, seg)
+                if v_el is not None and v_el.text:
+                    return v_el.text.strip()
+        return ""
+
+    # 1. Å tevilka raÄuna
+    stevilka = find_edi_val('S_BGM', 'D_1001', '380', 'D_1004')
+    if not stevilka:
+        # Bolj robusten fallback za EDIFACT (poiÅ¡Äi D_1004 v kateremkoli S_BGM)
+        for bgm in find_all('S_BGM'):
+            v = find_one('D_1004', bgm)
+            if v is not None and v.text:
+                stevilka = v.text.strip()
+                break
+    if not stevilka:
+        stevilka = find_path_val(['ID', 'Å tevilkaRaÄuna', 'StevilkaRacuna', 'IdRaÄuna', 'InvoiceNumber', 'DocumentNumber'])
+    
+
+
+    # 2. Datumi
+    datum_izdaje = find_edi_val('S_DTM', 'D_2005', '137', 'D_2380') or find_path_val(['IssueDate', 'DatumRaÄuna', 'DatumRacuna', 'DatumIzdaje', 'Datum'])
+    if datum_izdaje and 'T' in datum_izdaje: datum_izdaje = datum_izdaje.split('T')[0]
+    
+    datum_zapadlosti = find_edi_val('S_DTM', 'D_2005', '13', 'D_2380') or find_edi_val('S_DTM', 'D_2005', '209', 'D_2380') or find_edi_val('S_DTM', 'D_2005', '35', 'D_2380')
+    if not datum_zapadlosti:
+        datum_zapadlosti = find_path_val(['DueDate', 'DatumValute', 'DatumZapadlosti'])
+    if datum_zapadlosti and 'T' in datum_zapadlosti: datum_zapadlosti = datum_zapadlosti.split('T')[0]
+
+    ds_od = find_edi_val('S_DTM', 'D_2005', '167', 'D_2380')
+    ds_do = find_edi_val('S_DTM', 'D_2005', '168', 'D_2380')
+    datum_storitve = find_path_val(['DatumOpravljeneStoritve', 'DatumStoritve', 'DatumDobave'])
+    if not datum_storitve: datum_storitve = ds_do or datum_izdaje
+
+    # 3. Partner (Dobavitelj)
+    seller_naziv = ""
+    seller_davcna = ""
+    seller_ulica = ""
+    seller_postna = ""
+    seller_kraj = ""
+    seller_trr = ""
+    seller_telefon = ""
+    seller_email = ""
+    
+    # IÅ¡Äemo NAD segment s SE (Seller)
+    g_sg2_nodes = find_all('G_SG2')
+    for g2 in g_sg2_nodes:
+        nad = find_one('S_NAD', g2)
+        if nad is not None:
+            q = find_one('D_3035', nad)
+            if q is not None and q.text in ['SE', 'II', 'SU', 'PR']:
+                v_naziv = find_one('D_3036', nad)
+                if v_naziv is not None: seller_naziv = v_naziv.text.strip()
+                
+                # Ulica, Kraj, PoÅ¡ta v EDIFACT
+                v_ulica = find_one('D_3042', nad)
+                if v_ulica is not None: seller_ulica = v_ulica.text.strip()
+                v_kraj = find_one('D_3164', nad)
+                if v_kraj is not None: seller_kraj = v_kraj.text.strip()
+                v_postna = find_one('D_3251', nad)
+                if v_postna is not None: seller_postna = v_postna.text.strip()
+                
+                # DavÄna je v G2 nivoju (navadno v G_SG3/S_RFF)
+                seller_davcna = find_edi_val('S_RFF', 'D_1153', 'VA', 'D_1154', g2) or find_edi_val('S_RFF', 'D_1153', 'AHP', 'D_1154', g2) or find_edi_val('S_RFF', 'D_1153', 'CR', 'D_1154', g2)
+                
+                # Telefon in Email (S_COM)
+                seller_email = find_edi_val('S_COM', 'D_3155', 'EM', 'D_3148', g2)
+                seller_telefon = find_edi_val('S_COM', 'D_3155', 'TE', 'D_3148', g2)
+                
+                # IBAN (S_FII)
+                fii = find_one('S_FII', g2)
+                if fii is not None:
+                    v_iban = find_one('D_3194', fii)
+                    if v_iban is not None: seller_trr = v_iban.text.strip()
+                break
+            
+    # Iskanje konÄano. ÄŒe davÄne nismo naÅ¡li znotraj SE vozliÅ¡Äa, ne smemo
+    # iskati globalno, ker bi lahko dobili davÄno od kupca (uporabnika).
+        
+    if not seller_davcna or not seller_naziv:
+        # Fallback na standardne UBL/1.6 nivoje
+        seller_node = find_one('AccountingSupplierParty') or find_one('Izdajatelj') or find_one('Prodajalec')
+        if seller_node is not None:
+            seller_naziv = seller_naziv or find_path_val(['Name', 'RegistrationName', 'Naziv', 'PartyName/Name'], seller_node)
+            seller_davcna = seller_davcna or find_path_val(['CompanyID', 'DavÄnaÅ tevilka', 'DavcnaStevilka', 'PartyTaxScheme/CompanyID'], seller_node)
+            seller_ulica = seller_ulica or find_path_val(['PostalAddress/StreetName', 'Naslov'], seller_node)
+            seller_postna = seller_postna or find_path_val(['PostalAddress/PostalZone', 'PoÅ¡tnaÅ tevilka'], seller_node)
+            seller_kraj = seller_kraj or find_path_val(['PostalAddress/CityName', 'Kraj'], seller_node)
+            seller_trr = seller_trr or find_path_val(['FinancialAccount/ID'], seller_node)
+            seller_email = seller_email or find_path_val(['Contact/ElectronicMail', 'Email'], seller_node)
+            seller_telefon = seller_telefon or find_path_val(['Contact/Telephone', 'Telefon'], seller_node)
+
+    # VAT Payee detection
+    is_zavezanec = seller_davcna and ('SI' in seller_davcna.upper())
+    seller_davcna_cisto = re.sub(r'[^0-9]', '', seller_davcna).strip() if seller_davcna else ""
+
+    # 4. Zneski (ostaja isto)
+    # ...
+    z_skupaj_s = find_edi_val('S_MOA', 'D_5025', '9', 'D_5004') or find_path_val(['PayableAmount', 'ZnesekZaPlaÄilo', 'ZnesekSkupaj'])
+    znesek_skupaj = float((z_skupaj_s or "0").replace(',', '.'))
+    
+    z_neto_s = find_edi_val('S_MOA', 'D_5025', '79', 'D_5004') or find_path_val(['TaxExclusiveAmount', 'ZnesekBrezDDV', 'NetoZnesek'])
+    znesek_brez_ddv = float((z_neto_s or "0").replace(',', '.'))
+    
+    znesek_ddv = znesek_skupaj - znesek_brez_ddv
+
+        # 5. Postavke
+    postavke = []
+    lines = find_all('G_SG26') or find_all('InvoiceLine') or find_all('Postavka')
+    
+    for line in lines:
+        opis = find_path_val(['D_7008', 'Name', 'Opis', 'NazivArtikla'], line)
+        if not opis: continue
+        
+        kol_s = find_path_val(['D_6060', 'InvoicedQuantity', 'KoliÄina', 'Kolicina'], line)
+        kolicina = float((kol_s or "1").replace(',', '.'))
+        
+        # Stopnja DDV (Percent v UBL, D_5278 v EDIFACT)
+        ddv_s = find_path_val(['Percent', 'D_5278'], line)
+        ddv_rate = float((ddv_s or "22.0").replace(',', '.'))
+        
+        # Neto znesek postavke
+        skupaj_l_neto_s = find_edi_val('S_MOA', 'D_5025', '203', 'D_5004', line) or find_path_val(['LineExtensionAmount', 'ZnesekPostavke', 'Znesek'], line)
+        skupaj_l_neto = float((skupaj_l_neto_s or "0").replace(',', '.'))
+        
+        # Znesek skupaj (bruto, z DDV)
+        skupaj_l_bruto = skupaj_l_neto * (1 + ddv_rate / 100)
+
+        # Cena na enoto: vedno izraÄunamo iz skupaj / kolicina za konsistentnost
+        # (PriceAmount v XML se ne ujema vedno s formulo kolicina Ã— cena)
+        if kolicina != 0:
+            cena_enote = skupaj_l_bruto / kolicina
+        else:
+            # Fallback na PriceAmount iz XML
+            cena_s = find_path_val(['D_5118', 'PriceAmount', 'Cena'], line)
+            cena_neto = float((cena_s or "0").replace(',', '.'))
+            cena_enote = cena_neto * (1 + ddv_rate / 100) if cena_neto > 0 else skupaj_l_bruto
+
+        postavke.append({
+            "opis": opis,
+            "kolicina": kolicina,
+            "cena_enote": round(cena_enote, 6),
+            "znesek_skupaj": round(skupaj_l_bruto, 2),
+            "stopnja_ddv": ddv_rate
+        })
+
+    return {
+        "stevilka": stevilka or "NEZNANA",
+        "datum_izdaje": datum_izdaje or "2026-01-01",
+        "datum_zapadlosti": datum_zapadlosti or datum_izdaje,
+        "datum_storitve": datum_storitve or datum_izdaje,
+        "datum_storitve_od": ds_od or datum_izdaje,
+        "datum_storitve_do": ds_do or datum_izdaje,
+        "partner": {
+            "naziv": seller_naziv or "Neznan dobavitelj",
+            "davcna_stevilka": seller_davcna_cisto,
+            "ulica": seller_ulica or "",
+            "postna_stevilka": seller_postna or "",
+            "kraj": seller_kraj or "",
+            "drzava": "Slovenija",
+            "trr": seller_trr or "",
+            "telefon": seller_telefon or "",
+            "email": seller_email or "",
+            "zavezanec_za_ddv": is_zavezanec
+        },
+        "znesek_skupaj": znesek_skupaj,
+        "znesek_brez_ddv": znesek_brez_ddv,
+        "znesek_ddv": znesek_ddv,
+        "postavke": postavke
+    }
+
+@app.post("/api/dokumenti/import_eslog_pregled")
+async def import_eslog_pregled(file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        results = []
+        
+        if file.filename.endswith('.zip'):
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                for name in z.namelist():
+                    if name.lower().endswith('.xml'):
+                        xml_content = z.read(name)
+                        try:
+                            parsed = parse_eslog_xml(xml_content)
+                            enriched = _enrich_eslog_data(parsed)
+                            results.append(enriched)
+                        except Exception as e:
+                            print(f"Error parsing {name}: {e}")
+        else:
+            parsed = parse_eslog_xml(content)
+            enriched = _enrich_eslog_data(parsed)
+            results.append(enriched)
+
+        return {"items": results, "count": len(results)}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _enrich_eslog_data(data):
+    # Preveri Äe partner obstaja
+    davcna = (data['partner'].get('davcna_stevilka') or "").strip()
+    naziv = (data['partner'].get('naziv') or "").strip()
+    
+    conn = database.get_db()
+    cursor = conn.cursor()
+    row = None
+    
+    if davcna:
+        # 1. Poskusi ujemanje po davÄni Å¡tevilki (samo Äe ni prazna)
+        cursor.execute("SELECT id, naziv FROM partnerji WHERE davcna_stevilka = ?", (davcna,))
+        row = cursor.fetchone()
+    
+    if not row and naziv:
+        # 2. Poskusi ujemanje po toÄnem nazivu
+        cursor.execute("SELECT id, naziv FROM partnerji WHERE UPPER(naziv) = UPPER(?)", (naziv,))
+        row = cursor.fetchone()
+        
+    conn.close()
+    
+    data['partner_obstaja'] = row is not None
+    data['bizi_enriched'] = False
+
+    if row:
+        data['partner']['id'] = row['id']
+        data['partner']['naziv'] = row['naziv']
+    else:
+        # Novi partner â€” obogatimo podatke z Bizi.si
+        naziv_za_iskanje = data['partner'].get('naziv', '')
+        if naziv_za_iskanje:
+            try:
+                bizi_results = _bizi_search(naziv_za_iskanje)
+                if bizi_results:
+                    best = bizi_results[0]
+                    posta_kraj_split = best.get('posta_kraj', '').split(' ', 1)
+                    postna = posta_kraj_split[0] if len(posta_kraj_split) > 0 else ''
+                    kraj = posta_kraj_split[1] if len(posta_kraj_split) > 1 else ''
+                    
+                    detail = _bizi_detail_full(best['link'])
+                    data['partner']['naziv'] = best['naziv'] or data['partner']['naziv']
+                    data['partner']['ulica'] = best.get('naslov') or data['partner'].get('ulica', '')
+                    data['partner']['postna_stevilka'] = postna or data['partner'].get('postna_stevilka', '')
+                    data['partner']['kraj'] = kraj or data['partner'].get('kraj', '')
+                    data['partner']['telefon'] = detail.get('telefon') or data['partner'].get('telefon', '')
+                    data['partner']['email'] = detail.get('email') or data['partner'].get('email', '')
+                    data['partner']['trr'] = detail.get('trr') or data['partner'].get('trr', '')
+                    data['partner']['zavezanec_za_ddv'] = detail.get('zavezanec_za_ddv', best.get('zavezanec_za_ddv', False))
+                    data['bizi_enriched'] = True
+            except Exception as bizi_err:
+                print(f"Bizi.si enrichment failed: {bizi_err}")
+    return data
+
+@app.post("/api/dokumenti/import_eslog_bulk_potrdi")
+async def import_eslog_bulk_potrdi(request_data: dict):
+    items = request_data.get("items", [])
+    results = []
+    for data in items:
+        try:
+            doc_id = await _save_imported_eslog(data)
+            results.append(doc_id)
+        except Exception as e:
+            print(f"Bulk save error: {e}")
+    return {"status": "success", "count": len(results), "ids": results}
+
+async def _save_imported_eslog(data):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    
+    # 1. Partner
+    partner_id = data['partner'].get('id')
+    if not partner_id:
+        p = data['partner']
+        cursor.execute("""
+            INSERT INTO partnerji (naziv, ulica, postna_stevilka, kraj, drzava, davcna_stevilka, zavezanec_za_ddv, trr, telefon, email, vrsta)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dobavitelj')
+        """, (
+            p.get('naziv', ''), p.get('ulica', ''), p.get('postna_stevilka', ''),
+            p.get('kraj', ''), p.get('drzava', 'Slovenija'), p.get('davcna_stevilka', ''),
+            1 if p.get('zavezanec_za_ddv') else 0, p.get('trr', ''), p.get('telefon', ''), p.get('email', '')
+        ))
+        partner_id = cursor.lastrowid
+    
+    # 2. Dokument
+    poslovno_leto = int(data['datum_izdaje'].split('-')[0]) if '-' in data['datum_izdaje'] else 2026
+    cursor.execute("""
+        INSERT INTO dokumenti (poslovno_leto, tip, stevilka, partner_id, datum_izdaje, datum_zapadlosti, datum_storitve_od, datum_storitve_do, znesek_brez_ddv, znesek_ddv, znesek_skupaj, status)
+        VALUES (?, 'prejeti_racuni', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'neplaÄano')
+    """, (poslovno_leto, data['stevilka'], partner_id, data['datum_izdaje'], data['datum_zapadlosti'], data['datum_storitve_od'], data['datum_storitve_do'], data['znesek_brez_ddv'], data['znesek_ddv'], data['znesek_skupaj']))
+    
+    doc_id = cursor.lastrowid
+    
+    # 3. Postavke
+    for it in data['postavke']:
+        cursor.execute("""
+            INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (doc_id, it['opis'], it['kolicina'], it['cena_enote'], it['stopnja_ddv'], it['znesek_skupaj'], it.get('konto')))
+    
+    conn.commit()
+    conn.close()
+    return doc_id
+
+@app.post("/api/dokumenti/import_eslog_potrdi")
+async def import_eslog_potrdi(data: dict):
+    try:
+        conn = database.get_db()
+        cursor = conn.cursor()
+        
+        # 1. Partner
+        partner_id = data['partner'].get('id')
+        if not partner_id:
+            # Ustvari novega partnerja z vsemi podatki
+            p = data['partner']
+            cursor.execute("""
+                INSERT INTO partnerji (naziv, ulica, postna_stevilka, kraj, drzava, davcna_stevilka, zavezanec_za_ddv, trr, telefon, email, vrsta)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dobavitelj')
+            """, (
+                p.get('naziv', ''),
+                p.get('ulica', ''),
+                p.get('postna_stevilka', ''),
+                p.get('kraj', ''),
+                p.get('drzava', 'Slovenija'),
+                p.get('davcna_stevilka', ''),
+                1 if p.get('zavezanec_za_ddv') else 0,
+                p.get('trr', ''),
+                p.get('telefon', ''),
+                p.get('email', '')
+            ))
+            partner_id = cursor.lastrowid
+        
+        # 2. Dokument
+        poslovno_leto = int(data['datum_izdaje'].split('-')[0]) if '-' in data['datum_izdaje'] else 2026
+        cursor.execute("""
+            INSERT INTO dokumenti (poslovno_leto, tip, stevilka, partner_id, datum_izdaje, datum_zapadlosti, datum_storitve_od, datum_storitve_do, znesek_brez_ddv, znesek_ddv, znesek_skupaj, status)
+            VALUES (?, 'prejeti_racuni', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'neplaÄano')
+        """, (poslovno_leto, data['stevilka'], partner_id, data['datum_izdaje'], data['datum_zapadlosti'], data['datum_storitve_od'], data['datum_storitve_do'], data['znesek_brez_ddv'], data['znesek_ddv'], data['znesek_skupaj']))
+        
+        doc_id = cursor.lastrowid
+        
+        # 3. Postavke
+        for it in data['postavke']:
+            cursor.execute("""
+                INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (doc_id, it['opis'], it['kolicina'], it['cena_enote'], it['stopnja_ddv'], it['znesek_skupaj'], it.get('konto')))
+            
+        conn.commit()
+        conn.close()
+        return {"status": "success", "id": doc_id}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ZakljucnoBesedilo(BaseModel):
+    id: Optional[int] = None
+    naziv: str
+    besedilo: str
+
+@app.get("/api/zakljucna_besedila")
+def get_zakljucna_besedila():
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM zakljucna_besedila")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/zakljucna_besedila")
+def create_zakljucno_besedilo(zb: ZakljucnoBesedilo):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO zakljucna_besedila (naziv, besedilo) VALUES (?, ?)", (zb.naziv, zb.besedilo))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.put("/api/zakljucna_besedila/{id}")
+def update_zakljucno_besedilo(id: int, zb: ZakljucnoBesedilo):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE zakljucna_besedila SET naziv=?, besedilo=? WHERE id = ?", (zb.naziv, zb.besedilo, id))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.delete("/api/zakljucna_besedila/{id}")
+def delete_zakljucno_besedilo(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM zakljucna_besedila WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+# --- DOKUMENTI ---
+class DokumentPostavka(BaseModel):
+    opis: str
+    kolicina: float
+    cena_enote: float
+    stopnja_ddv: float = 22
+    znesek_skupaj: float
+    konto: Optional[str] = None
+    popust: float = 0.0
+
+class Dokument(BaseModel):
+    id: Optional[int] = None
+    poslovno_leto: int
+    tip: str
+    stevilka: Optional[str] = ""
+    partner_id: int
+    datum_izdaje: str
+    datum_zapadlosti: str
+    znesek_brez_ddv: float
+    znesek_ddv: float
+    znesek_skupaj: float
+    datum_storitve_od: Optional[str] = ""
+    datum_storitve_do: Optional[str] = ""
+    status: Optional[str] = "neplaÄano"
+    datum_placila: Optional[str] = ""
+    nacin_placila: Optional[str] = ""
+    zakljucno_besedilo: Optional[str] = ""
+    noga_dokumenta: Optional[str] = ""
+    opombe: Optional[str] = ""
+    postavke: List[DokumentPostavka]
+
+@app.delete("/api/dokumenti/{id}")
+def delete_dokument(id: int):
+    try:
+        conn = database.get_db()
+        cursor = conn.cursor()
+        # IzbriÅ¡i postavke
+        cursor.execute("DELETE FROM dokumenti_postavke WHERE dokument_id = ?", (id,))
+        # IzbriÅ¡i dokument
+        cursor.execute("DELETE FROM dokumenti WHERE id = ?", (id,))
+        conn.commit()
+        conn.close()
+        return {"status": "success"}
+    except Exception as e:
+        if 'conn' in locals(): conn.close()
+        print(f"Napaka pri brisanju dokumenta {id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Napaka pri brisanju: {str(e)}")
+
+@app.get("/api/dokumenti/{tip}")
+def get_dokumenti(tip: str):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT d.*, p.naziv as partner_naziv,
+        (SELECT EXISTS(SELECT 1 FROM priloge WHERE parent_type = 'dokumenti' AND parent_id = d.id)) as ima_prilogo,
+        IFNULL((SELECT SUM(znesek) FROM placila_povezave WHERE dokument_id = d.id), 0) as placano_znesek
+        FROM dokumenti d
+        LEFT JOIN partnerji p ON d.partner_id = p.id
+        WHERE d.tip = ? ORDER BY d.id DESC
+    """, (tip,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.get("/api/dokumenti/detajl/{id}")
+def get_dokument_detajl(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM dokumenti WHERE id = ?", (id,))
+    doc = cursor.fetchone()
+    if not doc:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Dokument ni najden")
+    
+    cursor.execute("SELECT * FROM dokumenti_postavke WHERE dokument_id = ?", (id,))
+    items = cursor.fetchall()
+    conn.close()
+    
+    res = dict(doc)
+    res['postavke'] = [dict(i) for i in items]
+    return res
+
+@app.post("/api/dokumenti")
+def create_dokument(doc: Dokument):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    
+    # Samodejno oÅ¡tevilÄevanje, Äe Å¡tevilka ni podana
+    stevilka = doc.stevilka
+    if not stevilka or stevilka == "":
+        cursor.execute("SELECT stevilka FROM dokumenti WHERE tip = ? AND poslovno_leto = ? AND stevilka LIKE '%-%'", (doc.tip, doc.poslovno_leto))
+        rows = cursor.fetchall()
+        
+        max_num = 0
+        for r in rows:
+            st = r['stevilka']
+            try:
+                # Handle both '001-2026' and '2026-001' historically just in case
+                parts = st.split('-')
+                if len(parts) == 2:
+                    if parts[0].isdigit() and len(parts[0]) <= 4 and int(parts[0]) != doc.poslovno_leto:
+                        # Format NNN-YYYY
+                        num = int(parts[0])
+                    else:
+                        # Format YYYY-NNN
+                        num = int(parts[1])
+                    if num > max_num:
+                        max_num = num
+            except:
+                pass
+                
+        next_num = max_num + 1
+        stevilka = f"{next_num:03d}-{doc.poslovno_leto}"
+    
+    cursor.execute("""
+        INSERT INTO dokumenti (poslovno_leto, tip, stevilka, partner_id, datum_izdaje, datum_zapadlosti, znesek_brez_ddv, znesek_ddv, znesek_skupaj, datum_storitve_od, datum_storitve_do, status, datum_placila, nacin_placila, zakljucno_besedilo, noga_dokumenta, opombe)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (doc.poslovno_leto, doc.tip, stevilka, doc.partner_id, doc.datum_izdaje, doc.datum_zapadlosti, doc.znesek_brez_ddv, doc.znesek_ddv, doc.znesek_skupaj, doc.datum_storitve_od, doc.datum_storitve_do, doc.status, doc.datum_placila, doc.nacin_placila, doc.zakljucno_besedilo, doc.noga_dokumenta, doc.opombe))
+    
+    doc_id = cursor.lastrowid
+    for p in doc.postavke:
+        cursor.execute("""
+            INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto, popust)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (doc_id, p.opis, p.kolicina, p.cena_enote, p.stopnja_ddv, p.znesek_skupaj, p.konto, p.popust))
+    
+    conn.commit()
+    
+    # Samodejno generiranje PDF za izdane dokumente
+    if doc.tip in ['izdani_racuni', 'ponudbe', 'dobropisi']:
+        try:
+            ustvari_in_pripni_pdf(doc_id)
+        except Exception as e:
+            print(f"Napaka pri generiranju PDF: {e}")
+
+    conn.close()
+    return {"status": "success", "id": doc_id, "stevilka": stevilka}
+
+@app.put("/api/dokumenti/{id}")
+def update_dokument(id: int, doc: Dokument):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    # Brisanje starih postavk
+    cursor.execute("DELETE FROM dokumenti_postavke WHERE dokument_id = ?", (id,))
+    
+    if not doc.stevilka:
+        cursor.execute("SELECT stevilka FROM dokumenti WHERE id = ?", (id,))
+        row = cursor.fetchone()
+        if row: doc.stevilka = row['stevilka']
+    
+    # Posodobitev glave
+    cursor.execute("""
+        UPDATE dokumenti SET 
+            poslovno_leto=?, tip=?, stevilka=?, partner_id=?, datum_izdaje=?, datum_zapadlosti=?, 
+            znesek_brez_ddv=?, znesek_ddv=?, znesek_skupaj=?, datum_storitve_od=?, datum_storitve_do=?, 
+            status=?, datum_placila=?, nacin_placila=?, zakljucno_besedilo=?, noga_dokumenta=?, opombe=?
+        WHERE id = ?
+    """, (doc.poslovno_leto, doc.tip, doc.stevilka, doc.partner_id, doc.datum_izdaje, doc.datum_zapadlosti, 
+          doc.znesek_brez_ddv, doc.znesek_ddv, doc.znesek_skupaj, doc.datum_storitve_od, doc.datum_storitve_do, 
+          doc.status, doc.datum_placila, doc.nacin_placila, doc.zakljucno_besedilo, doc.noga_dokumenta, doc.opombe, id))
+    
+    # Vstavljanje novih postavk
+    for p in doc.postavke:
+        cursor.execute("""
+            INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto, popust)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (id, p.opis, p.kolicina, p.cena_enote, p.stopnja_ddv, p.znesek_skupaj, p.konto, p.popust))
+    
+    conn.commit()
+    
+    # Samodejno generiranje PDF za izdane dokumente
+    if doc.tip in ['izdani_racuni', 'ponudbe', 'dobropisi']:
+        try:
+            ustvari_in_pripni_pdf(id)
+        except Exception as e:
+            print(f"Napaka pri generiranju PDF: {e}")
+
+    conn.close()
+    return {"status": "success", "id": id}
+
+# --- BANÄŒNI IZPISKI ---
+class IzpisekPostavka(BaseModel):
+    id: Optional[int] = None
+    tip_prometa: str
+    partner_id: Optional[int] = None
+    namen: str
+    znesek: float
+    koda_namena: Optional[str] = ""
+    konto: Optional[str] = ""
+
+class Izpisek(BaseModel):
+    id: Optional[int] = None
+    datum: str
+    stevilka_izpiska: str
+    zacetno_stanje: float
+    koncno_stanje: float
+    kontrolna_vsota: float
+    postavke: List[IzpisekPostavka]
+
+@app.get("/api/izpiski")
+def get_izpiski():
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT ig.*, 
+        (SELECT SUM(znesek) FROM izpiski_postavke WHERE izpisek_id = ig.id AND tip_prometa = 'dobro') as vsota_prilivov,
+        (SELECT SUM(znesek) FROM izpiski_postavke WHERE izpisek_id = ig.id AND tip_prometa = 'breme') as vsota_odlivov,
+        (SELECT EXISTS(SELECT 1 FROM priloge WHERE parent_type = 'izpiski' AND parent_id = ig.id)) as ima_prilogo
+        FROM izpiski_glava ig ORDER BY datum DESC, CAST(stevilka_izpiska AS INTEGER) DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.get("/api/izpiski/detajl/{id}")
+def get_izpisek_detajl(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM izpiski_glava WHERE id = ?", (id,))
+    glava = cursor.fetchone()
+    
+    cursor.execute("""
+        SELECT p.*, part.naziv as partner_naziv,
+               (SELECT COUNT(*) FROM placila_povezave WHERE izpisek_postavka_id = p.id) as st_povezav
+        FROM izpiski_postavke p 
+        LEFT JOIN partnerji part ON p.partner_id = part.id
+        WHERE p.izpisek_id = ?
+    """, (id,))
+    postavke = cursor.fetchall()
+    conn.close()
+    
+    res = dict(glava)
+    res['postavke'] = [dict(p) for p in postavke]
+    return res
+
+@app.delete("/api/izpiski/{id}")
+def delete_izpisek(id: int):
+    try:
+        conn = database.get_db()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM izpiski_postavke WHERE izpisek_id = ?", (id,))
+        cursor.execute("DELETE FROM izpiski_glava WHERE id = ?", (id,))
+        conn.commit()
+        conn.close()
+        return {"status": "success"}
+    except Exception as e:
+        if 'conn' in locals(): conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/izpiski")
+def create_izpisek(izpisek: Izpisek):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO izpiski_glava (datum, stevilka_izpiska, zacetno_stanje, koncno_stanje, kontrolna_vsota)
+        VALUES (?, ?, ?, ?, ?)
+    """, (izpisek.datum, izpisek.stevilka_izpiska, izpisek.zacetno_stanje, izpisek.koncno_stanje, izpisek.kontrolna_vsota))
+    
+    izp_id = cursor.lastrowid
+    for p in izpisek.postavke:
+        cursor.execute("""
+            INSERT INTO izpiski_postavke (izpisek_id, tip_prometa, partner_id, namen, znesek, koda_namena, konto)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (izp_id, p.tip_prometa, p.partner_id, p.namen, p.znesek, p.koda_namena, p.konto))
+    
+    conn.commit()
+    conn.close()
+    return {"status": "success", "id": izp_id}
+
+@app.put("/api/izpiski/{id}")
+def update_izpisek(id: int, izpisek: Izpisek):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    
+    # 1. Pridobimo trenutne ID-je postavk v bazi
+    cursor.execute("SELECT id FROM izpiski_postavke WHERE izpisek_id = ?", (id,))
+    existing_ids = {row['id'] for row in cursor.fetchall()}
+    
+    # 2. Seznam ID-jev, ki jih Å¾elimo ohraniti (so v payloadu)
+    new_items_with_ids = [p for p in izpisek.postavke if p.id is not None]
+    new_ids = {p.id for p in new_items_with_ids}
+    
+    # 3. IzbriÅ¡emo tiste, ki jih ni veÄ v payloadu
+    to_delete = existing_ids - new_ids
+    for del_id in to_delete:
+        cursor.execute("DELETE FROM izpiski_postavke WHERE id = ?", (del_id,))
+        # Opcijsko: izbriÅ¡emo tudi likvidacije za te postavke
+        cursor.execute("DELETE FROM placila_povezave WHERE izpisek_postavka_id = ?", (del_id,))
+
+    # 4. Posodobimo glavo
+    cursor.execute("""
+        UPDATE izpiski_glava SET datum=?, stevilka_izpiska=?, zacetno_stanje=?, koncno_stanje=?, kontrolna_vsota=?
+        WHERE id = ?
+    """, (izpisek.datum, izpisek.stevilka_izpiska, izpisek.zacetno_stanje, izpisek.koncno_stanje, izpisek.kontrolna_vsota, id))
+    
+    # 5. Posodobimo obstojeÄe ali vstavimo nove postavke
+    result_ids = []
+    for p in izpisek.postavke:
+        if p.id and p.id in existing_ids:
+            # UPDATE
+            cursor.execute("""
+                UPDATE izpiski_postavke SET 
+                    tip_prometa=?, partner_id=?, namen=?, znesek=?, koda_namena=?, konto=?
+                WHERE id = ?
+            """, (p.tip_prometa, p.partner_id, p.namen, p.znesek, p.koda_namena, p.konto, p.id))
+            result_ids.append(p.id)
+        else:
+            # INSERT
+            cursor.execute("""
+                INSERT INTO izpiski_postavke (izpisek_id, tip_prometa, partner_id, namen, znesek, koda_namena, konto)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (id, p.tip_prometa, p.partner_id, p.namen, p.znesek, p.koda_namena, p.konto))
+            result_ids.append(cursor.lastrowid)
+    
+    conn.commit()
+    conn.close()
+    return {"status": "success", "postavke_ids": result_ids}
+
+def extract_data_from_sepa_xml(content, filename=None):
+    """Parses ISO 20022 Camt.053 SEPA XML bank statement"""
+    root = ET.fromstring(content)
+    # Handle namespaces dynamically
+    ns_match = re.match(r'\{(.*)\}', root.tag)
+    ns_uri = ns_match.group(1) if ns_match else ""
+    ns = {'n': ns_uri} if ns_uri else {}
+    
+    def q(path):
+        """Helper to prefix path with namespace if present"""
+        if not ns_uri: return path.replace('n:', '')
+        return path
+        
+    def find_val(el, path):
+        found = el.find(q(path), ns)
+        return found.text if found is not None else ""
+
+    data = {"transactions": []}
+    
+    stmt = root.find(".//" + q("n:Stmt"), ns)
+    if stmt is None: return None # Not a valid statement
+    
+    # Statement Metadata
+    stmt_id = find_val(stmt, "n:Id")
+    seq_nb = find_val(stmt, "n:LglSeqNb") or find_val(stmt, "n:ElctrncSeqNb")
+    
+    final_num = seq_nb if seq_nb else stmt_id
+    
+    # Fallback to filename if ID is too long/technical or unknown
+    if filename and (not final_num or len(final_num) > 10 or final_num == "UNKNOWN"):
+        num_match = re.search(r'^(\d+)', filename)
+        if num_match: final_num = num_match.group(1)
+        
+    data['statement_number'] = final_num
+    
+    # Balances and Date
+    data['statement_date'] = ""
+    for bal in stmt.findall(q("n:Bal"), ns):
+        tp_node = bal.find(q("n:Tp/n:CdOrPrtry/n:Cd"), ns)
+        amt = find_val(bal, "n:Amt")
+        dt_val = find_val(bal, "n:Dt/n:Dt") or find_val(bal, "n:Dt/n:DtTm")
+        
+        if tp_node is not None and amt:
+            tp = tp_node.text
+            if tp == 'OPBD': data['opening_balance'] = float(amt)
+            if tp == 'CLBD': 
+                data['closing_balance'] = float(amt)
+                if dt_val: data['statement_date'] = dt_val[:10]
+
+    if not data['statement_date']:
+        cre_date = find_val(stmt, "n:CreDtTm")
+        data['statement_date'] = cre_date[:10] if cre_date else ""
+            
+    # Transactions (Entries)
+    for ntry in stmt.findall(q("n:Ntry"), ns):
+        val = find_val(ntry, "n:Amt")
+        if not val: continue
+        amt = float(val)
+        if amt == 0: continue
+        
+        ind = find_val(ntry, "n:CdtDbtInd")
+        tp = "dobro" if ind == "CRDT" else "breme"
+        
+        # Details
+        tx_dtls = ntry.find(q("n:NtryDtls/n:TxDtls"), ns)
+        desc = ""
+        partner = "Neznan"
+        
+        if tx_dtls is not None:
+            desc = find_val(tx_dtls, "n:RmtInf/n:Ustrd")
+            # Partner depends on direction
+            rltd = tx_dtls.find(q("n:RltdPties"), ns)
+            if rltd is not None:
+                p_path = q("n:Dbtr/n:Nm") if ind == "CRDT" else q("n:Cdtr/n:Nm")
+                p_node = rltd.find(p_path, ns)
+                if p_node is not None: partner = p_node.text
+
+        data['transactions'].append({
+            'amount': amt,
+            'type': tp,
+            'code': "PMNT",
+            'description': desc,
+            'partner': partner,
+            'raw_description': desc
+        })
+        
+    return data
+
+def _enrich_izpisek_data(raw_data):
+    """Common logic for partner matching and enrichment for all statement formats"""
+    postavke = []
+    partner_names = []
+    
+    conn = database.get_db()
+    cursor = conn.cursor()
+    
+    def get_core_name(name):
+        if not name: return ""
+        cleaned = name.upper().replace(",", " ").replace(".", " ").replace("-", " ")
+        suffixes = ["D O O", "S P", "D D", "D N O", "K D", "Z O O", "V D"]
+        for s in suffixes:
+            cleaned = cleaned.replace(f" {s} ", " ")
+            if cleaned.endswith(f" {s}"): cleaned = cleaned[:-len(s)-1]
+            if cleaned.startswith(f"{s} "): cleaned = cleaned[len(s)+1:]
+        parts = [p.strip() for p in cleaned.split() if len(p.strip()) > 2]
+        return parts[0] if parts else cleaned.strip()
+
+    cursor.execute("SELECT id, naziv FROM partnerji")
+    all_partners = [{"id": r["id"], "naziv": r["naziv"], "core": get_core_name(r["naziv"])} for r in cursor.fetchall()]
+    
+    for tx in raw_data['transactions']:
+        partner_id = None
+        search_text = f"{(tx.get('partner') or '').upper()} {(tx.get('description') or '').upper()}"
+        for p in all_partners:
+            if p["core"] and p["core"] in search_text:
+                partner_id = p["id"]
+                break
+        
+        # Predlagaj konto glede na tip
+        konto = "1100" # Privzeto
+        if tx['type'] == 'breme':
+            if "PROVIZIJA" in search_text or "NADOMESTILO" in search_text:
+                konto = "4150"
+        
+        postavke.append({
+            "tip_prometa": tx['type'],
+            "partner_id": partner_id,
+            "partner_naziv": tx.get('partner', 'Neznan'),
+            "namen": tx.get('description', ''),
+            "znesek": tx['amount'],
+            "koda_namena": tx.get('code', 'PMNT'),
+            "konto": konto
+        })
+        partner_names.append(tx.get('partner', 'Neznan'))
+    
+    conn.close()
+    
+    return {
+        "datum": raw_data['statement_date'],
+        "stevilka_izpiska": raw_data['statement_number'],
+        "zacetno_stanje": raw_data.get('opening_balance', 0),
+        "koncno_stanje": raw_data.get('closing_balance', 0),
+        "kontrolna_vsota": sum([p['znesek'] * (1 if p['tip_prometa']=='dobro' else -1) for p in postavke]),
+        "vsota_prilivov": sum([p['znesek'] for p in postavke if p['tip_prometa']=='dobro']),
+        "vsota_odlivov": sum([p['znesek'] for p in postavke if p['tip_prometa']=='breme']),
+        "postavke": postavke,
+        "partner_names": partner_names
+    }
+
+@app.post("/api/izpiski/parse")
+async def parse_izpisek(file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        results = []
+        
+        files_to_process = []
+        if file.filename.lower().endswith('.zip'):
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                for name in z.namelist():
+                    if name.lower().endswith(('.pdf', '.xml')):
+                        files_to_process.append((name, z.read(name)))
+        else:
+            files_to_process.append((file.filename, content))
+            
+        for name, data in files_to_process:
+            try:
+                raw_data = None
+                if name.lower().endswith('.pdf'):
+                    # Temporary PDF file for parser
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(data)
+                        tmp_path = tmp.name
+                    raw_data = extract_data_from_pdf(tmp_path)
+                    os.unlink(tmp_path)
+                elif name.lower().endswith('.xml'):
+                    raw_data = extract_data_from_sepa_xml(data, name)
+                
+                if raw_data:
+                    enriched = _enrich_izpisek_data(raw_data)
+                    # Add source filename for UI
+                    enriched['source_file'] = name
+                    results.append(enriched)
+            except Exception as e:
+                print(f"Napaka pri obdelavi {name}: {e}")
+                # Ne prekinemo celotnega uvoza, Äe ena datoteka spodleti
+
+        return {"items": results, "count": len(results)}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _parse_single_pdf_content(content):
+    # Ta funkcija se zdaj ne uporablja veÄ direktno v parse_izpisek, 
+    # ampak jo pustimo za nazaj ali spremenimo v klic refaktorirane logike Äe je treba.
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        raw_data = extract_data_from_pdf(tmp_path)
+    finally:
+        if os.path.exists(tmp_path): os.remove(tmp_path)
+
+@app.post("/api/izpiski/bulk_potrdi")
+async def izpiski_bulk_potrdi(request_data: dict):
+    items = request_data.get("items", [])
+    results = []
+    conn = database.get_db()
+    cursor = conn.cursor()
+    try:
+        for data in items:
+            cursor.execute("""
+                INSERT INTO izpiski_glava (datum, stevilka_izpiska, zacetno_stanje, koncno_stanje, kontrolna_vsota)
+                VALUES (?, ?, ?, ?, ?)
+            """, (data['datum'], data['stevilka_izpiska'], data['zacetno_stanje'], data['koncno_stanje'], 0))
+            
+            izp_id = cursor.lastrowid
+            for p in data['postavke']:
+                cursor.execute("""
+                    INSERT INTO izpiski_postavke (izpisek_id, tip_prometa, partner_id, namen, znesek, koda_namena, konto)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (izp_id, p['tip_prometa'], p['partner_id'], p['namen'], p['znesek'], p['koda_namena'], p['konto']))
+            results.append(izp_id)
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Bulk save error: {str(e)}")
+    finally:
+        conn.close()
+    return {"status": "success", "count": len(results), "ids": results}
+
+# --- PLAÄŒE IN PRISPEVKI ---
+class Placa(BaseModel):
+    id: Optional[int] = None
+    zaposleni_id: int
+    mesec: str
+    leto: int
+    vrsta_zaposlitve: str # sp_100 (100%), sp_50 (50%), zaposlen
+    bruto_placa: float
+    neto_izplacilo: float = 0.0
+    znesek_piz: float = 0.0
+    znesek_zz: float = 0.0
+    znesek_zap: float = 0.0
+    znesek_starsevsko: float = 0.0
+    znesek_ozp: float = 35.0
+    znesek_do: float = 0.0
+    znesek_akontacija_doh: float = 0.0
+    znesek_skupaj: float = 0.0
+    sklic: Optional[str] = ""
+    zapadlost: Optional[str] = ""
+    placan: bool = False
+
+@app.get("/api/place")
+def get_place():
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT p.*, z.ime_priimek as zaposleni_ime 
+        FROM place p 
+        LEFT JOIN zaposleni z ON p.zaposleni_id = z.id
+        ORDER BY p.leto DESC, 
+        CASE p.mesec 
+            WHEN 'Januar' THEN 1 WHEN 'Februar' THEN 2 WHEN 'Marec' THEN 3 WHEN 'April' THEN 4 
+            WHEN 'Maj' THEN 5 WHEN 'Junij' THEN 6 WHEN 'Julij' THEN 7 WHEN 'Avgust' THEN 8 
+            WHEN 'September' THEN 9 WHEN 'Oktober' THEN 10 WHEN 'November' THEN 11 WHEN 'December' THEN 12
+            ELSE 0 
+        END DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/place")
+def create_placa(p: Placa):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO place (zaposleni_id, mesec, leto, vrsta_zaposlitve, bruto_placa, neto_izplacilo, 
+        znesek_piz, znesek_zz, znesek_zap, znesek_starsevsko, znesek_ozp, znesek_do, znesek_akontacija_doh, 
+        znesek_skupaj, sklic, zapadlost, placan)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (p.zaposleni_id, p.mesec, p.leto, p.vrsta_zaposlitve, p.bruto_placa, p.neto_izplacilo, 
+          p.znesek_piz, p.znesek_zz, p.znesek_zap, p.znesek_starsevsko, p.znesek_ozp, p.znesek_do, p.znesek_akontacija_doh, 
+          p.znesek_skupaj, p.sklic, p.zapadlost, p.placan))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.put("/api/place/{id}")
+def update_placa(id: int, p: Placa):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE place SET zaposleni_id=?, mesec=?, leto=?, vrsta_zaposlitve=?, bruto_placa=?, neto_izplacilo=?, 
+        znesek_piz=?, znesek_zz=?, znesek_zap=?, znesek_starsevsko=?, znesek_ozp=?, znesek_do=?, znesek_akontacija_doh=?, 
+        znesek_skupaj=?, sklic=?, zapadlost=?, placan=?
+        WHERE id=?
+    """, (p.zaposleni_id, p.mesec, p.leto, p.vrsta_zaposlitve, p.bruto_placa, p.neto_izplacilo, 
+          p.znesek_piz, p.znesek_zz, p.znesek_zap, p.znesek_starsevsko, p.znesek_ozp, p.znesek_do, p.znesek_akontacija_doh, 
+          p.znesek_skupaj, p.sklic, p.zapadlost, p.placan, id))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.delete("/api/place/{id}")
+def delete_placa(id: int):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM place WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+# --- OSNOVNA SREDSTVA ---
+class OsnovnoSredstvo(BaseModel):
+    id: Optional[int] = None
+    naziv: str
+    aktiven: Optional[bool] = True
+    amortizacijska_skupina: Optional[str] = ""
+    inventarna_stevilka: str
+    datum_nabave: str
+    nabavna_vrednost: float
+    stopnja_amortizacije: float
+    trenutna_vrednost: Optional[float] = 0.0
+
+@app.get("/api/osnovna_sredstva/next_inv")
+def next_inv():
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT inventarna_stevilka FROM osnovna_sredstva ORDER BY id DESC LIMIT 1")
+    row = cursor.fetchone()
+    conn.close()
+    if row and row['inventarna_stevilka']:
+        try:
+            num = int(row['inventarna_stevilka'])
+            return {"stevilka": f"{num+1:03d}"}
+        except ValueError:
+            pass
+    return {"stevilka": "001"}
+
+@app.get("/api/osnovna_sredstva")
+def get_osnovna_sredstva():
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM osnovna_sredstva")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/osnovna_sredstva")
+def create_osnovno_sredstvo(os_obj: OsnovnoSredstvo):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO osnovna_sredstva (naziv, aktiven, amortizacijska_skupina, inventarna_stevilka, datum_nabave, nabavna_vrednost, stopnja_amortizacije, trenutna_vrednost)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (os_obj.naziv, os_obj.aktiven, os_obj.amortizacijska_skupina, os_obj.inventarna_stevilka, os_obj.datum_nabave, os_obj.nabavna_vrednost, os_obj.stopnja_amortizacije, os_obj.trenutna_vrednost))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.put("/api/osnovna_sredstva/{id}")
+def update_osnovno_sredstvo(id: int, os_obj: OsnovnoSredstvo):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE osnovna_sredstva SET naziv=?, aktiven=?, amortizacijska_skupina=?, inventarna_stevilka=?, datum_nabave=?, nabavna_vrednost=?, stopnja_amortizacije=?, trenutna_vrednost=?
+        WHERE id = ?
+    """, (os_obj.naziv, os_obj.aktiven, os_obj.amortizacijska_skupina, os_obj.inventarna_stevilka, os_obj.datum_nabave, os_obj.nabavna_vrednost, os_obj.stopnja_amortizacije, os_obj.trenutna_vrednost, id))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.delete("/api/osnovna_sredstva/{id}")
+def delete_osnovno_sredstvo(id: int):
+    try:
+        conn = database.get_db()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM osnovna_sredstva WHERE id = ?", (id,))
+        conn.commit()
+        conn.close()
+        return {"status": "success"}
+    except Exception as e:
+        if 'conn' in locals(): conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+# --- ZAPOSLENI ---
+class Zaposleni(BaseModel):
+    id: Optional[int] = None
+    ime_priimek: str
+    naslov: Optional[str] = None
+    davcna_stevilka: Optional[str] = None
+    iban: Optional[str] = None
+    delovno_mesto: Optional[str] = None
+
+@app.get("/api/zaposleni")
+def get_zaposleni():
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM zaposleni ORDER BY ime_priimek")
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/api/zaposleni")
+def create_zaposleni(z: Zaposleni):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("INSERT INTO zaposleni (ime_priimek, naslov, davcna_stevilka, iban, delovno_mesto) VALUES (?, ?, ?, ?, ?)",
+              (z.ime_priimek, z.naslov, z.davcna_stevilka, z.iban, z.delovno_mesto))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.put("/api/zaposleni/{id}")
+def update_zaposleni(id: int, z: Zaposleni):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("UPDATE zaposleni SET ime_priimek=?, naslov=?, davcna_stevilka=?, iban=?, delovno_mesto=? WHERE id=?",
+              (z.ime_priimek, z.naslov, z.davcna_stevilka, z.iban, z.delovno_mesto, id))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.delete("/api/zaposleni/{id}")
+def delete_zaposleni(id: int):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM zaposleni WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+# --- POTNI NALOGI ---
+class PotniNalog(BaseModel):
+    id: Optional[int] = None
+    stevilka_naloga: str
+    zaposleni_id: int
+    vozilo: Optional[str] = None
+    namen: Optional[str] = None
+    datum_izdaje: Optional[str] = None
+    datum_cas_odhoda: Optional[str] = None
+    datum_cas_povratka: Optional[str] = None
+    relacija_zacetek: Optional[str] = None
+    relacija_cilj: Optional[str] = None
+    relacija_konec: Optional[str] = None
+    razdalja_km: Optional[float] = 0.0
+    znesek_kilometrine: Optional[float] = 0.0
+    znesek_dnevnice: Optional[float] = 0.0
+    skupni_znesek: Optional[float] = 0.0
+
+@app.get("/api/potni_nalogi")
+def get_potni_nalogi():
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT p.*, z.ime_priimek as zaposleni_ime 
+        FROM potni_nalogi p 
+        LEFT JOIN zaposleni z ON p.zaposleni_id = z.id
+        ORDER BY p.id DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.get("/api/potni_nalogi/next_stevilka")
+def next_pn_stevilka(leto: str):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("SELECT stevilka_naloga FROM potni_nalogi WHERE stevilka_naloga LIKE ? ORDER BY id DESC LIMIT 1", (f"%{leto}",))
+    row = c.fetchone()
+    conn.close()
+    if row and row['stevilka_naloga']:
+        try:
+            num = int(row['stevilka_naloga'].split('-')[0])
+            return {"stevilka": f"{num+1:03d}-{leto}"}
+        except:
+            pass
+    return {"stevilka": f"001-{leto}"}
+
+@app.post("/api/potni_nalogi")
+def create_potni_nalog(p: PotniNalog):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO potni_nalogi (stevilka_naloga, zaposleni_id, vozilo, namen, datum_izdaje, 
+        datum_cas_odhoda, datum_cas_povratka, relacija_zacetek, relacija_cilj, relacija_konec, 
+        razdalja_km, znesek_kilometrine, znesek_dnevnice, skupni_znesek)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (p.stevilka_naloga, p.zaposleni_id, p.vozilo, p.namen, p.datum_izdaje, p.datum_cas_odhoda, 
+          p.datum_cas_povratka, p.relacija_zacetek, p.relacija_cilj, p.relacija_konec, p.razdalja_km, 
+          p.znesek_kilometrine, p.znesek_dnevnice, p.skupni_znesek))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.put("/api/potni_nalogi/{id}")
+def update_potni_nalog(id: int, p: PotniNalog):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE potni_nalogi SET stevilka_naloga=?, zaposleni_id=?, vozilo=?, namen=?, datum_izdaje=?, 
+        datum_cas_odhoda=?, datum_cas_povratka=?, relacija_zacetek=?, relacija_cilj=?, relacija_konec=?, 
+        razdalja_km=?, znesek_kilometrine=?, znesek_dnevnice=?, skupni_znesek=?
+        WHERE id=?
+    """, (p.stevilka_naloga, p.zaposleni_id, p.vozilo, p.namen, p.datum_izdaje, p.datum_cas_odhoda, 
+          p.datum_cas_povratka, p.relacija_zacetek, p.relacija_cilj, p.relacija_konec, p.razdalja_km, 
+          p.znesek_kilometrine, p.znesek_dnevnice, p.skupni_znesek, id))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.delete("/api/potni_nalogi/{id}")
+def delete_potni_nalog(id: int):
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM potni_nalogi WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.get("/api/vozila")
+def get_vozila():
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT vozilo FROM potni_nalogi WHERE vozilo IS NOT NULL AND vozilo != ''")
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+# --- TARIFE POTANJ (Scraping limitov na 1. v mesecu) ---
+import datetime
+
+@app.get("/api/tarife")
+def get_tarife():
+    conn = database.get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM tarife_potanj WHERE id = 1")
+    row = c.fetchone()
+    
+    # Preveri, Äe je danes 1. v mesecu in ali smo ta mesec Å¾e preverili
+    danes = datetime.date.today()
+    if row and danes.day == 1:
+        zadnje = row['zadnje_preverjanje']
+        if not zadnje or not zadnje.startswith(danes.strftime("%Y-%m")):
+            # Scrapanje - za primer zanesljivosti poskusimo dobiti z urlja, sicer uporabimo statiÄne iz baze
+            try:
+                # Tu bi Å¡la koda za strganje: requests.get(...)
+                pass
+                
+                # ZapiÅ¡emo, da smo preverili
+                c.execute("UPDATE tarife_potanj SET zadnje_preverjanje=? WHERE id=1", (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
+                conn.commit()
+            except Exception as e:
+                print("Napaka pri avtomatskem preverjanju tarif:", e)
+                
+    # OsveÅ¾en row
+    c.execute("SELECT * FROM tarife_potanj WHERE id = 1")
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return {"kilometrina": 0.43, "dnevnica_polna": 27.81, "dnevnica_polovicna": 13.88, "dnevnica_znizana": 9.69}
+    return dict(row)
+@app.post("/api/bulk-delete")
+async def bulk_delete(request_data: dict):
+    module = request_data.get("module")
+    ids = request_data.get("ids", [])
+    if not ids: return {"status": "success", "count": 0}
+    
+    conn = database.get_db()
+    cursor = conn.cursor()
+    try:
+        if module == 'partnerji':
+            for id in ids:
+                cursor.execute("SELECT COUNT(*) as cnt FROM dokumenti WHERE partner_id = ?", (id,))
+                if cursor.fetchone()['cnt'] > 0:
+                    raise HTTPException(status_code=400, detail=f"Partnerja {id} ni mogoÄe brisati, ker ima vezane dokumente.")
+            cursor.execute(f"DELETE FROM partnerji WHERE id IN ({','.join(['?']*len(ids))})", ids)
+        elif module == 'dokumenti':
+            cursor.execute(f"DELETE FROM dokumenti_postavke WHERE dokument_id IN ({','.join(['?']*len(ids))})", ids)
+            cursor.execute(f"DELETE FROM dokumenti WHERE id IN ({','.join(['?']*len(ids))})", ids)
+        elif module == 'izpiski':
+            cursor.execute(f"DELETE FROM izpiski_postavke WHERE izpisek_id IN ({','.join(['?']*len(ids))})", ids)
+            cursor.execute(f"DELETE FROM izpiski_glava WHERE id IN ({','.join(['?']*len(ids))})", ids)
+        elif module == 'zaposleni':
+            cursor.execute(f"DELETE FROM zaposleni WHERE id IN ({','.join(['?']*len(ids))})", ids)
+        elif module == 'potni_nalogi':
+            cursor.execute(f"DELETE FROM potni_nalogi WHERE id IN ({','.join(['?']*len(ids))})", ids)
+        elif module == 'osnovna_sredstva':
+            cursor.execute(f"DELETE FROM osnovna_sredstva WHERE id IN ({','.join(['?']*len(ids))})", ids)
+        elif module == 'place':
+            cursor.execute(f"DELETE FROM place WHERE id IN ({','.join(['?']*len(ids))})", ids)
+        elif module == 'konti':
+            cursor.execute(f"DELETE FROM kontni_nacrt WHERE id IN ({','.join(['?']*len(ids))})", ids)
+            
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+    return {"status": "success", "count": len(ids)}
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
+

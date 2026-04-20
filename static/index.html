@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invoice83</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <style>
+        .gear-btn {
+            background: white; border: 1px solid #dee2e6; border-radius: 50%;
+            width: 38px; height: 38px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.2em; box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+            flex-shrink: 0;
+        }
+        .gear-btn:hover { transform: rotate(60deg); background: #f1f3f5; }
+        
+        .header-tools {
+            position: fixed; top: 14px; right: 20px; z-index: 1000;
+            display: flex; align-items: center; gap: 15px;
+        }
+        
+        #company-switcher {
+            padding: 6px 12px;
+            border-radius: 20px;
+            border: 1px solid #dee2e6;
+            background: white;
+            font-size: 0.85em;
+            font-weight: 600;
+            color: var(--primary-blue);
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            outline: none;
+            transition: all 0.2s;
+            max-width: 200px;
+        }
+        
+        #company-switcher:hover {
+            border-color: var(--primary-blue);
+            background: #f8f9fa;
+        }
+        /* Partner popup modal */
+        #partner-popup-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.4); z-index: 9999;
+            align-items: center; justify-content: center;
+        }
+        #partner-popup-overlay.active { display: flex; }
+        #partner-popup-box {
+            background: white; border-radius: 8px; padding: 25px;
+            width: 420px; max-width: 95vw;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+
+        /* Startup error display */
+        #startup-monitor-overlay {
+            display: none; position: fixed; inset: 0; background: white; z-index: 10000;
+            align-items: center; justify-content: center; flex-direction: column; text-align: center;
+            padding: 20px;
+        }
+    </style>
+    <script>
+        // Startup Monitor
+        window._bootStartTime = Date.now();
+        window._bootTimer = setTimeout(function() {
+            if (!window._appLoaded) {
+                document.getElementById('startup-monitor-overlay').style.display = 'flex';
+                document.getElementById('startup-error-msg').innerText = "Aplikacija se nalaga dlje kot običajno. To lahko pomeni napako v kodi ali težavo s strežnikom.";
+            }
+        }, 8000);
+
+        window.addEventListener('error', function(e) {
+            if (!window._appLoaded) {
+                document.getElementById('startup-monitor-overlay').style.display = 'flex';
+                document.getElementById('startup-error-msg').innerHTML = "<b>Kritična napaka pri nalaganju:</b><br>" + e.message + "<br><small style='color:#999'>" + e.filename + ":" + e.lineno + "</small>";
+            }
+        });
+    </script>
+</head>
+<body>
+    <!-- Startup Monitor Overlay -->
+    <div id="startup-monitor-overlay">
+        <div style="max-width: 500px;">
+            <div style="font-size: 3em; margin-bottom: 10px;">⚠️</div>
+            <h2 style="color: var(--primary-red);">Težava pri komunikaciji</h2>
+            <p id="startup-error-msg">Nalagam...</p>
+            <div style="margin-top: 25px;">
+                <button class="btn btn-blue" onclick="location.reload()">Ponovno naloži stran</button>
+            </div>
+            <p style="margin-top: 20px; font-size: 0.85em; color: #999;">
+                Če se težava ponavlja, prosim preverite, če je strežnik vklopljen ali preverite zadnje popravke v kodi.
+            </p>
+        </div>
+    </div>
+
+    <!-- Zobnik za nastavitve (zgoraj desno) -->
+    <div class="header-tools">
+        <div id="company-switcher-container">
+            <select id="company-switcher" onchange="window.switchCompany(this.value)">
+                <option value="">Nalagam podjetja...</option>
+            </select>
+        </div>
+        <button class="gear-btn" title="Nastavitve" onclick="showModule('nastavitve')">⚙️</button>
+    </div>
+
+    <div class="sidebar">
+        <div class="brand">
+            <h1>Invoice83</h1>
+        </div>
+        <nav>
+            <div style="padding: 10px 20px; border-bottom: 1px solid var(--border-color); margin-bottom: 10px;">
+                <label style="font-size: 0.75rem; color: var(--text-muted); display:block; margin-bottom: 5px; text-transform:uppercase; font-weight:bold;">Poslovno leto</label>
+                <select id="poslovno-leto" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); background: white; font-weight:bold; color:var(--primary-blue);">
+                    <option value="2023">2023</option>
+                    <option value="2024">2024</option>
+                    <option value="2025">2025</option>
+                    <option value="2026" selected>2026</option>
+                    <option value="2027">2027</option>
+                </select>
+            </div>
+            <a href="#" class="active" onclick="showModule('dashboard')">Nadzorna plošča</a>
+            <a href="#" onclick="showModule('partnerji')">Poslovni partnerji</a>
+            <a href="#" onclick="showModule('izdani_racuni')">Izdani računi</a>
+            <a href="#" onclick="showModule('prejeti_racuni')">Prejeti računi</a>
+            <a href="#" onclick="showModule('ponudbe')">Ponudbe</a>
+            <a href="#" onclick="showModule('dobropisi')">Dobropisi</a>
+            <a href="#" onclick="showModule('izpiski')">Bančni izpiski</a>
+            
+            <div style="padding: 15px 20px 5px 20px; font-size: 0.75rem; color: var(--text-muted); text-transform:uppercase; font-weight:bold;">Zaposleni</div>
+            <a href="#" onclick="showModule('zaposleni')">Seznam zaposlenih</a>
+            <a href="#" onclick="showModule('potni_nalogi')">Potni nalogi</a>
+            <a href="#" onclick="showModule('prispevki')">Plače / Prispevki</a>
+
+            <div style="padding: 15px 20px 5px 20px; font-size: 0.75rem; color: var(--text-muted); text-transform:uppercase; font-weight:bold;">Drugo</div>
+            <a href="#" onclick="showModule('osnovna_sredstva')">Osnovna sredstva</a>
+        </nav>
+    </div>
+    <div class="main-content">
+        <header>
+            <h2 id="module-title">Nadzorna plošča</h2>
+        </header>
+        <main id="app-content">
+            <!-- Vsebina se bo naložila tukaj -->
+        </main>
+    </div>
+
+    <!-- Skriti input za nalaganje logotipa -->
+    <input type="file" id="logo-input" accept="image/*" style="display:none" onchange="window.handleLogoUpload(this)">
+
+    <!-- Pop-up modal za dodajanje partnerja iz bancnih izpiskov (popoln obrazec) -->
+    <div id="partner-popup-overlay">
+        <div id="partner-popup-box" style="width:620px; max-height:85vh; overflow-y:auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin:0; color:var(--primary-blue);">Dodaj novega partnerja</h3>
+                <button onclick="window.zapriPartnerPopup()" style="background:none; border:none; font-size:1.4em; cursor:pointer; color:#868e96;">&times;</button>
+            </div>
+
+            <!-- Bizi.si iskanje -->
+            <div style="background:#f8f9fa; padding:15px; border-radius:6px; margin-bottom:15px; border:1px solid #dee2e6;">
+                <label style="font-weight:bold; display:block; margin-bottom:8px; color:var(--primary-red); font-size:0.9em;">Iskanje po Bizi.si</label>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="pp_bizi_q" placeholder="Ime podjetja ali davčna številka..." style="flex:1; padding:6px 10px; border:1px solid #ccc; border-radius:4px;">
+                    <button class="btn btn-blue" onclick="window.iskanjeBiziPopup()" style="white-space:nowrap;">Išči</button>
+                </div>
+                <div id="pp_bizi_results" style="max-height:180px; overflow-y:auto; margin-top:8px;"></div>
+            </div>
+
+            <!-- Partner polja -->
+            <div class="form-group"><label>Polni naziv *</label><input type="text" id="pp_naziv" required></div>
+            <div style="display:flex; gap:10px;">
+                <div class="form-group" style="flex:2"><label>Ulica in hišna št.</label><input type="text" id="pp_ulica"></div>
+                <div class="form-group" style="flex:1"><label>Poštna številka</label><input type="text" id="pp_posta"></div>
+            </div>
+            <div style="display:flex; gap:10px;">
+                <div class="form-group" style="flex:1"><label>Kraj</label><input type="text" id="pp_kraj"></div>
+                <div class="form-group" style="flex:1"><label>Država</label><input type="text" id="pp_drzava" value="Slovenija"></div>
+            </div>
+            <div style="display:flex; gap:10px;">
+                <div class="form-group" style="flex:1"><label>Davčna številka</label><input type="text" id="pp_davcna"></div>
+                <div class="form-group" style="flex:1; display:flex; align-items:center; gap:8px; padding-top:18px;">
+                    <input type="checkbox" id="pp_zavezanec" style="width:auto; margin:0;">
+                    <label for="pp_zavezanec" style="margin:0;">Zavezanec za DDV</label>
+                </div>
+            </div>
+            <div style="display:flex; gap:10px;">
+                <div class="form-group" style="flex:1"><label>TRR (IBAN)</label><input type="text" id="pp_trr"></div>
+                <div class="form-group" style="flex:1"><label>E-naslov</label><input type="email" id="pp_email"></div>
+            </div>
+            <div style="display:flex; gap:10px;">
+                <div class="form-group" style="flex:1"><label>Telefon</label><input type="text" id="pp_telefon"></div>
+                <div class="form-group" style="flex:1"><label>Vrsta</label>
+                    <select id="pp_vrsta"><option value="oba">Oba</option><option value="kupec">Kupec</option><option value="dobavitelj">Dobavitelj</option></select>
+                </div>
+            </div>
+
+            <div style="margin-top:15px; padding-top:15px; border-top:1px solid #eee; display:flex; gap:10px; justify-content:flex-end;">
+                <button class="btn" style="background:#eee; color:#333;" onclick="window.zapriPartnerPopup()">Prekliči</button>
+                <button class="btn btn-blue" onclick="window.shraniPartnerPopup()">Shrani partnerja</button>
+            </div>
+        </div>
+    </div>
+
+    <datalist id="konti-datalist"></datalist>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <script src="https://npmcdn.com/flatpickr/dist/l10n/sl.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

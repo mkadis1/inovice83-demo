@@ -1,0 +1,8 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pdfplumber==0.11.4
+xhtml2pdf==0.2.16
+requests==2.32.3
+beautifulsoup4==4.12.3
+python-multipart==0.0.9
+pydantic==2.8.2
