@@ -7,8 +7,9 @@ import shutil
 import uuid
 import traceback
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, UploadFile, File, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Response, Request
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import database
@@ -30,7 +31,47 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 UPLOADS_DIR = Path("uploads")
 UPLOADS_DIR.mkdir(exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")# --- Demo: Enotno podjetje, fiksna baza ---
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+SESSIONS_DIR = Path("sessions")
+SESSIONS_DIR.mkdir(exist_ok=True)
+
+# --- Middleware za izolacijo sej ---
+class SessionMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Izoliramo samo API klica, ki spreminjajo ali berejo podatke
+        # Izpustimo statične datoteke, root in osnovne meta-podatke
+        path = request.url.path
+        if not path.startswith("/api") or path in ["/api/heartbeat", "/api/companies"]:
+            return await call_next(request)
+
+        session_id = request.headers.get("X-Session-ID")
+        if not session_id:
+            # Če ni seje, uporabimo skupno 'public' bazo (za vsak slučaj)
+            database.set_active_db("demo.db")
+            return await call_next(request)
+
+        # Čiščenje ID-ja (samo alfanumerični znaki za varnost poti)
+        safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
+        session_db_path = SESSIONS_DIR / f"{safe_id}.db"
+
+        # Če baza za to sejo še ne obstaja, jo skopiramo iz master predloge
+        if not session_db_path.exists():
+            try:
+                shutil.copy2("demo.db", session_db_path)
+            except Exception as e:
+                print(f"Napaka pri ustvarjanju sejne baze: {e}")
+                database.set_active_db("demo.db")
+                return await call_next(request)
+
+        # Nastavimo bazo za trenutno zahtevo (ContextVar poskrbi za thread-safety)
+        database.set_active_db(str(session_db_path))
+        
+        return await call_next(request)
+
+app.add_middleware(SessionMiddleware)
+
+# --- Demo: Enotno podjetje, fiksna baza ---
 @app.on_event("startup")
 def startup():
     database.set_active_db("demo.db")

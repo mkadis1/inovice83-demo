@@ -1,14 +1,16 @@
 import sqlite3
 import os
+import contextvars
 
-DB_NAME = "racunovodstvo.db"
+# ContextVar za varno shranjevanje poti do baze za vsako zahtevo posebej
+_active_db_path = contextvars.ContextVar("active_db_path", default="demo.db")
 
 def set_active_db(name):
-    global DB_NAME
-    DB_NAME = name
+    _active_db_path.set(name)
 
 def get_db():
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    path = _active_db_path.get()
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 

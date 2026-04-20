@@ -1,6 +1,30 @@
 const contentDiv = document.getElementById('app-content');
 const titleEl = document.getElementById('module-title');
 
+// --- SESSION ISOLATION (DEMO) ---
+(function() {
+    let sessionID = localStorage.getItem('invoice83_session_id');
+    if (!sessionID) {
+        sessionID = 'sess-' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+        localStorage.setItem('invoice83_session_id', sessionID);
+    }
+    
+    const originalFetch = window.fetch;
+    window.fetch = function(url, options = {}) {
+        if (typeof url === 'string' && url.includes('/api/')) {
+            if (!options.headers) {
+                options.headers = {};
+            }
+            if (options.headers instanceof Headers) {
+                options.headers.set('X-Session-ID', sessionID);
+            } else {
+                options.headers['X-Session-ID'] = sessionID;
+            }
+        }
+        return originalFetch(url, options);
+    };
+})();
+
 // Startup Error Boundary
 window.onerror = function(msg, url, line, col, error) {
     if (!window._appLoaded) {
