@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 import pdf_parser
 from pdf_parser import extract_data_from_pdf
 import io
-from xhtml2pdf import pisa
+
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
