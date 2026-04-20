@@ -6,3 +6,5 @@ requests==2.32.3
 beautifulsoup4==4.12.3
 python-multipart==0.0.9
 pydantic==2.8.2
+fpdf2==2.7.9
+qrcode==7.4.2
