@@ -37,39 +37,37 @@ SESSIONS_DIR = Path("sessions")
 SESSIONS_DIR.mkdir(exist_ok=True)
 
 # --- Middleware za izolacijo sej ---
-class SessionMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Izoliramo samo API klica, ki spreminjajo ali berejo podatke
-        # Izpustimo statične datoteke, root in osnovne meta-podatke
-        path = request.url.path
-        if not path.startswith("/api") or path in ["/api/heartbeat", "/api/companies"]:
-            return await call_next(request)
+@app.middleware("http")
+async def session_isolation_middleware(request: Request, call_next):
+    # Izpustimo statične datoteke, root in osnovne meta-podatke
+    path = request.url.path
+    if not path.startswith("/api") or path in ["/api/heartbeat", "/api/companies", "/api/debug-session"]:
+        return await call_next(request)
 
-        session_id = request.headers.get("X-Session-ID")
-        if not session_id:
-            # Če ni seje, uporabimo skupno 'public' bazo (za vsak slučaj)
+    session_id = request.headers.get("X-Session-ID")
+    if not session_id:
+        print(f"DEBUG: Manjkajoč Session-ID za {path}. Uporabljam demo.db")
+        database.set_active_db("demo.db")
+        return await call_next(request)
+
+    # Čiščenje ID-ja
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
+    session_db_path = SESSIONS_DIR / f"{safe_id}.db"
+
+    if not session_db_path.exists():
+        try:
+            print(f"DEBUG: Ustvarjam novo sejno bazo za {safe_id}")
+            shutil.copy2("demo.db", session_db_path)
+        except Exception as e:
+            print(f"DEBUG: Napaka pri kopiranju: {e}")
             database.set_active_db("demo.db")
             return await call_next(request)
 
-        # Čiščenje ID-ja (samo alfanumerični znaki za varnost poti)
-        safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
-        session_db_path = SESSIONS_DIR / f"{safe_id}.db"
-
-        # Če baza za to sejo še ne obstaja, jo skopiramo iz master predloge
-        if not session_db_path.exists():
-            try:
-                shutil.copy2("demo.db", session_db_path)
-            except Exception as e:
-                print(f"Napaka pri ustvarjanju sejne baze: {e}")
-                database.set_active_db("demo.db")
-                return await call_next(request)
-
-        # Nastavimo bazo za trenutno zahtevo (ContextVar poskrbi za thread-safety)
-        database.set_active_db(str(session_db_path))
-        
-        return await call_next(request)
-
-app.add_middleware(SessionMiddleware)
+    # Nastavimo bazo za trenutno zahtevo
+    database.set_active_db(str(session_db_path))
+    # print(f"DEBUG: Zahteva {path} uporablja {session_db_path.name}")
+    
+    return await call_next(request)
 
 # --- Demo: Enotno podjetje, fiksna baza ---
 @app.on_event("startup")
@@ -101,6 +99,20 @@ def read_root():
 @app.get("/api/heartbeat")
 def heartbeat():
     return {"ok": True}
+
+@app.get("/api/debug-session")
+def debug_session(request: Request):
+    conn = database.get_db()
+    # Poberemo aktivno pot iz povezave
+    try:
+        db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+    except:
+        db_path = "unknown"
+    conn.close()
+    return {
+        "header_session_id": request.headers.get("X-Session-ID"),
+        "active_db": os.path.basename(db_path)
+    }
 
 # --- Partnerji ---
 class Partner(BaseModel):

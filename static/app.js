@@ -5,24 +5,35 @@ const titleEl = document.getElementById('module-title');
 (function() {
     let sessionID = localStorage.getItem('invoice83_session_id');
     if (!sessionID) {
-        sessionID = 'sess-' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+        sessionID = 'sess-' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
         localStorage.setItem('invoice83_session_id', sessionID);
     }
+    console.log("Invoice83 Session ID:", sessionID);
     
     const originalFetch = window.fetch;
-    window.fetch = function(url, options = {}) {
+    window.fetch = function(input, init = {}) {
+        let url = (typeof input === 'string') ? input : input.url;
+        
         if (typeof url === 'string' && url.includes('/api/')) {
-            if (!options.headers) {
-                options.headers = {};
-            }
-            if (options.headers instanceof Headers) {
-                options.headers.set('X-Session-ID', sessionID);
+            if (!init.headers) init.headers = {};
+            
+            if (init.headers instanceof Headers) {
+                init.headers.set('X-Session-ID', sessionID);
             } else {
-                options.headers['X-Session-ID'] = sessionID;
+                init.headers['X-Session-ID'] = sessionID;
             }
         }
-        return originalFetch(url, options);
+        return originalFetch(input, init);
     };
+
+    // Diagnostika
+    setTimeout(async () => {
+        try {
+            const res = await fetch('/api/debug-session');
+            const data = await res.json();
+            console.log("Session Debug info:", data);
+        } catch(e) {}
+    }, 1000);
 })();
 
 // Startup Error Boundary
