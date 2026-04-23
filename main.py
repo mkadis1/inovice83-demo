@@ -73,29 +73,10 @@ async def session_isolation_middleware(request: Request, call_next):
     database.set_active_db(str(session_db_path))
     return await call_next(request)
 
-
-
-        import json
-        json.dump(registry, f, indent=4)
-
 @app.on_event("startup")
 def startup():
     database.set_active_db("demo.db")
     database.init_db()
-
-    registry = get_companies_registry()
-    active_id = registry.get("active_id", "default")
-    active_company = next((c for c in registry["items"] if c["id"] == active_id), registry["items"][0])
-    
-    database.set_active_db(active_company["db"])
-    database.init_db()
-    
-    # Zagotovi, da obstaja vsaj ena vrstica v nastavitvah
-    conn = database.get_db()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO nastavitve (id, naziv) VALUES (1, 'Moje Podjetje d.o.o.')")
-    conn.commit()
-    conn.close()
 
 @app.get("/api/companies")
 def list_companies():
@@ -109,32 +90,6 @@ def switch_company(company_id: str):
 def create_company(data: dict):
     from fastapi import HTTPException
     raise HTTPException(status_code=403, detail="Ustvarjanje podjetij ni dovoljeno v demo verziji.")
-
-    name = data.get("name")
-    if not name:
-        raise HTTPException(status_code=400, detail="Ime podjetja je obvezno")
-    
-    registry = get_companies_registry()
-    new_id = f"comp_{uuid.uuid4().hex[:8]}"
-    db_name = f"{new_id}.db"
-    
-    new_company = {"id": new_id, "name": name, "db": db_name}
-    registry["items"].append(new_company)
-    registry["active_id"] = new_id
-    save_companies_registry(registry)
-    
-    # Iniciraj novo bazo
-    database.set_active_db(db_name)
-    database.init_db()
-    
-    # Nastavi začetne podatke za podjetje
-    conn = database.get_db()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO nastavitve (id, naziv) VALUES (1, ?)", (name,))
-    conn.commit()
-    conn.close()
-    
-    return {"status": "success", "company": new_company}
 
 @app.get("/")
 def read_root():
