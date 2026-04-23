@@ -9,4 +9,4 @@ fpdf2==2.7.9
 qrcode==7.4.2
 pytesseract==0.3.10
 Pillow>=10.0.0
-xhtml2pdf==0.2.16
+
