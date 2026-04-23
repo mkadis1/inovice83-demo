@@ -1,2 +1,4 @@
 tesseract-ocr
 tesseract-ocr-slv
+libcairo2-dev
+pkg-config
