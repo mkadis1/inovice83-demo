@@ -220,11 +220,13 @@ def init_db():
         FOREIGN KEY (dokument_id) REFERENCES dokumenti(id)
     );
     """)
-    # Migracija: Dodaj kratko_ime v nastavitve, če ne obstaja
-    try:
-        cursor.execute("ALTER TABLE nastavitve ADD COLUMN kratko_ime TEXT")
-    except:
-        pass
+    # Migracija: Dodaj vkljuci_placilo in odstotek_placila v dokumenti
+    try: cursor.execute("ALTER TABLE dokumenti ADD COLUMN vkljuci_placilo BOOLEAN DEFAULT 1")
+    except: pass
+    try: cursor.execute("ALTER TABLE dokumenti ADD COLUMN odstotek_placila REAL DEFAULT 100")
+    except: pass
+
+    conn.commit()
 
     conn.commit()
     conn.close()

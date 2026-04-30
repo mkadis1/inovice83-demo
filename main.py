@@ -8,26 +8,26 @@ import shutil
 import uuid
 import traceback
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, UploadFile, File, Response, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Response
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import database
 import uvicorn
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from PIL import Image
 import pytesseract
 import pdfplumber
 
-if os.name == 'nt':
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
+# Pot do Tesseracta na Windows
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 from bs4 import BeautifulSoup
 import pdf_parser
 from pdf_parser import extract_data_from_pdf
 import io
+from xhtml2pdf import pisa
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -36,6 +36,10 @@ import threading
 import time
 
 app = FastAPI(title="Invoice83 API")
+
+def get_now_slo():
+    """Vrne trenutni čas v Sloveniji (Europe/Ljubljana) v formatu YYYY-MM-DD HH:MM:SS."""
+    return datetime.now(ZoneInfo("Europe/Ljubljana")).strftime("%Y-%m-%d %H:%M:%S")
 
 
 
@@ -74,10 +78,29 @@ async def session_isolation_middleware(request: Request, call_next):
     database.set_active_db(str(session_db_path))
     return await call_next(request)
 
+
+
+        import json
+        json.dump(registry, f, indent=4)
+
 @app.on_event("startup")
 def startup():
     database.set_active_db("demo.db")
     database.init_db()
+
+    registry = get_companies_registry()
+    active_id = registry.get("active_id", "default")
+    active_company = next((c for c in registry["items"] if c["id"] == active_id), registry["items"][0])
+    
+    database.set_active_db(active_company["db"])
+    database.init_db()
+    
+    # Zagotovi, da obstaja vsaj ena vrstica v nastavitvah
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO nastavitve (id, naziv) VALUES (1, 'Moje Podjetje d.o.o.')")
+    conn.commit()
+    conn.close()
 
 @app.get("/api/companies")
 def list_companies():
@@ -91,6 +114,32 @@ def switch_company(company_id: str):
 def create_company(data: dict):
     from fastapi import HTTPException
     raise HTTPException(status_code=403, detail="Ustvarjanje podjetij ni dovoljeno v demo verziji.")
+
+    name = data.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="Ime podjetja je obvezno")
+    
+    registry = get_companies_registry()
+    new_id = f"comp_{uuid.uuid4().hex[:8]}"
+    db_name = f"{new_id}.db"
+    
+    new_company = {"id": new_id, "name": name, "db": db_name}
+    registry["items"].append(new_company)
+    registry["active_id"] = new_id
+    save_companies_registry(registry)
+    
+    # Iniciraj novo bazo
+    database.set_active_db(db_name)
+    database.init_db()
+    
+    # Nastavi začetne podatke za podjetje
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO nastavitve (id, naziv) VALUES (1, ?)", (name,))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "success", "company": new_company}
 
 @app.get("/")
 def read_root():
@@ -142,6 +191,9 @@ class Nastavitve(BaseModel):
     smtp_username: Optional[str] = ""
     smtp_password: Optional[str] = ""
     smtp_use_tls: Optional[bool] = True
+    email_template_racun: Optional[str] = ""
+    email_template_ponudba: Optional[str] = ""
+    email_template_dobropis: Optional[str] = ""
 
 class PlaciloPovezava(BaseModel):
     dokument_id: int
@@ -153,7 +205,9 @@ class LikvidacijaRequest(BaseModel):
 
 class ManualnaLikvidacijaRequest(BaseModel):
     izpisek_postavka_id: int
-    manualna: bool
+
+class EmailRequest(BaseModel):
+    priloge_ids: List[int] = []
 
 class Konto(BaseModel):
     id: Optional[int] = None
@@ -178,8 +232,8 @@ async def upload_priloga(parent_type: str, parent_id: int, file: UploadFile = Fi
     conn = database.get_db()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO priloge (parent_type, parent_id, filename, original_name) VALUES (?, ?, ?, ?)",
-        (parent_type, parent_id, unique_name, file.filename)
+        "INSERT INTO priloge (parent_type, parent_id, filename, original_name, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+        (parent_type, parent_id, unique_name, file.filename, get_now_slo())
     )
     conn.commit()
     new_id = cursor.lastrowid
@@ -299,8 +353,9 @@ def delete_partner(id: int):
     return {"status": "success"}
 
 
-# --- Bizi.si pomožne funkcije (notranje) ---
-def _bizi_search(q: str):
+# --- Bizi.si pomožne funkcije ---
+@app.get("/api/partnerji/search_bizi")
+def search_bizi(q: str):
     """Poišče podjetje na Bizi.si in vrne seznam zadetkov."""
     url = f"https://www.bizi.si/iskanje?q={q}"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -329,10 +384,11 @@ def _bizi_search(q: str):
                 "davcna_stevilka": davcna, "zavezanec_za_ddv": is_zavezanec, "link": link
             })
         return results
-    except:
-        return []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Napaka pri iskanju na Bizi.si: {str(e)}")
 
-def _bizi_detail_full(url: str):
+@app.get("/api/partnerji/bizi_detail")
+def bizi_detail(url: str):
     """Pridobi podrobne kontaktne podatke in TRR podjetja z Bizi.si."""
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -358,103 +414,11 @@ def _bizi_detail_full(url: str):
                 if trr_el: trr = trr_el.get_text(strip=True).replace("IBAN", "").strip()
         except: pass
         return {"telefon": phone, "email": email, "zavezanec_za_ddv": zavezanec, "trr": trr}
-    except:
-        return {"telefon": "", "email": "", "zavezanec_za_ddv": False, "trr": ""}
-
-@app.get("/api/partnerji/search_bizi")
-def search_bizi(q: str):
-    url = f"https://www.bizi.si/iskanje?q={q}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        results = []
-        rows = soup.select(".b-table-row")
-        
-        for row in rows:
-            name_el = row.select_one(".b-link-company")
-            if not name_el: continue
-            
-            cols = row.select(".col")
-            if len(cols) < 6: continue
-            
-            name = name_el.get_text(strip=True)
-            href = name_el['href'] if name_el.has_attr('href') else ""
-            link = href if href.startswith("http") else "https://www.bizi.si" + href
-            
-            # Address is typically in 3rd col (index 2)
-            naslov = ""
-            naslov_el = row.select_one('a[href*="openMapTis"]')
-            if not naslov_el:
-                naslov_el = cols[2].select_one('a')
-            
-            if naslov_el:
-                naslov = naslov_el.get_text(strip=True)
-            else:
-                naslov = cols[2].get_text(strip=True)
-                
-            posta_kraj = cols[3].get_text(strip=True)
-            davcna_raw = cols[5].get_text(strip=True)
-            is_zavezanec = "SI" in davcna_raw
-            davcna = davcna_raw.replace("SI", "").strip()
-            
-            results.append({
-                "naziv": name,
-                "naslov": naslov,
-                "posta_kraj": posta_kraj,
-                "davcna_stevilka": davcna,
-                "zavezanec_za_ddv": is_zavezanec,
-                "link": link
-            })
-            
-        return results
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Napaka pri iskanju na Bizi.si: {str(e)}")
-
-@app.get("/api/partnerji/bizi_detail")
-def bizi_detail(url: str):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # Phone
-        phone_el = soup.select_one("a.i-ostalo-telefon")
-        phone = phone_el.get_text(strip=True) if phone_el else ""
-        
-        # Email
-        email_el = soup.select_one("#ctl00_ctl00_cphMain_CompanyDetailsTitleBasic1_aMail")
-        email = email_el.get_text(strip=True) if email_el else ""
-        
-        # Tax Payer Status
-        zavezanec = False
-        labels = soup.select(".b-attr-name, .b-attr-label")
-        for label in labels:
-            text = label.get_text(strip=True)
-            if "Zavezanec za DDV" in text:
-                value_el = label.find_next_sibling("div", class_="b-attr-value")
-                if value_el and "Da" in value_el.get_text():
-                    zavezanec = True
-                break
-        
-        # TRR (IBAN) - Fetch from trr-in-blokade subpage
-        trr = ""
-        try:
-            trr_url = url.rstrip('/') + "/trr-in-blokade/"
-            r_trr = requests.get(trr_url, headers=headers, timeout=5)
-            if r_trr.ok:
-                soup_trr = BeautifulSoup(r_trr.text, 'html.parser')
-                trr_el = soup_trr.select_one("div.b-attr-value-item-trr span.b-attr-value:not(.b-text-line-through)")
-                if trr_el:
-                    trr = trr_el.get_text(strip=True).replace("IBAN", "").strip()
-        except: pass
-
-        return {"telefon": phone, "email": email, "zavezanec_za_ddv": zavezanec, "trr": trr}
     except Exception as e:
         return {"telefon": "", "email": "", "zavezanec_za_ddv": False, "trr": "", "error": str(e)}
+
+
+
 
 # --- Nastavitve ---
 @app.get("/api/nastavitve")
@@ -476,12 +440,12 @@ def save_nastavitve(n: Nastavitve):
             naziv=?, ulica=?, posta_kraj=?, drzava=?, davcna_stevilka=?, 
             zavezanec_za_ddv=?, trr=?, banka=?, email_posiljatelja=?, telefon=?, spletna_stran=?,
             kratko_ime=?, dvostavno_knjigovodstvo=?, smtp_server=?, smtp_port=?, smtp_username=?,
-            smtp_password=?, smtp_use_tls=?
+            smtp_password=?, smtp_use_tls=?, email_template_racun=?, email_template_ponudba=?, email_template_dobropis=?
         WHERE id = 1
     """, (n.naziv, n.ulica, n.posta_kraj, n.drzava, n.davcna_stevilka, 
           n.zavezanec_za_ddv, n.trr, n.banka, n.email_posiljatelja, n.telefon, n.spletna_stran,
           n.kratko_ime, n.dvostavno_knjigovodstvo, n.smtp_server, n.smtp_port, n.smtp_username,
-          n.smtp_password, n.smtp_use_tls))
+          n.smtp_password, n.smtp_use_tls, n.email_template_racun, n.email_template_ponudba, n.email_template_dobropis))
     conn.commit()
     conn.close()
     
@@ -540,7 +504,7 @@ def get_odprte_postavke(partner_id: int):
         SELECT d.id, d.tip, d.stevilka, d.datum_izdaje, d.datum_zapadlosti, d.znesek_skupaj, d.status,
         IFNULL((SELECT SUM(znesek) FROM placila_povezave WHERE dokument_id = d.id), 0) as placano_znesek
         FROM dokumenti d
-        WHERE d.partner_id = ? AND d.tip IN ('izdani_racuni', 'prejeti_racuni', 'dobropisi')
+        WHERE d.partner_id = ? AND d.tip IN ('izdani_racuni', 'prejeti_racuni', 'dobropisi', 'prejeti_dobropisi')
         AND (d.status != 'plačano' OR d.status IS NULL)
         ORDER BY d.datum_zapadlosti ASC
     """, (partner_id,))
@@ -666,7 +630,7 @@ async def upload_logo(file: UploadFile = File(...)):
 def izracunaj_kontrolno_stevilko(stevilka_str):
     """
     Izračun kontrolne številke po modulu 97 (ISO 7064 MOD 97-10).
-    Uporablja se za slovenske sklice SI12.
+    Uporablja se za slovenske sklice SI12 (v nekaterih modulih).
     """
     # Odstrani vse ne-številčne znake
     s = "".join(filter(str.isdigit, stevilka_str))
@@ -863,111 +827,108 @@ def generate_pdf_invoice(invoice_data, company_data, partner_data, items):
     pdf.set_text_color(100, 100, 100)
     pdf.cell(0, 4, 'Hvala za vaše zaupanje.', ln=1)
     pdf.ln(2)
-    pdf.set_font('DejaVu', 'B', 8)
-    pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 4, 'Plačilni podatki:', ln=1)
-    pdf.set_font('DejaVu', '', 8)
-    pdf.cell(0, 4, f"IBAN: {company_data.get('trr', '')}", ln=1)
-    pdf.cell(0, 4, f"Banka: {company_data.get('banka', '')}", ln=1)
     
-    # SI12 in QR koda
-    raw_num = "".join(filter(str.isdigit, invoice_data.get('stevilka', '')))
-    # Zagotovimo, da imamo vsaj številko leta in zaporedno številko
-    kontrolna = izracunaj_kontrolno_stevilko(raw_num)
-    sklic_poln = f"{raw_num}{kontrolna}"
-    pdf.cell(0, 4, f"Pri plačilu uporabite referenco plačila: SI12 {sklic_poln}", ln=1)
+    # Ugotovimo ali vključimo plačilne podatke in QR kodo
+    # SQLite shrani bool kot 0/1, .get() pa vrne None če ključa ni (npr. stari zapisi)
+    # Ugotovimo ali vključimo plačilne podatke in QR kodo
+    v_placilo = True
+    if 'vkljuci_placilo' in invoice_data:
+        v_raw = invoice_data['vkljuci_placilo']
+        # SQLite shrani 0/1, JSON pa True/False. Preverimo vse možnosti.
+        if v_raw == 0 or v_raw is False or str(v_raw).lower() == '0' or str(v_raw).lower() == 'false':
+            v_placilo = False
     
-    # UPN-QR generiranje (Uradni slovenski standard ZBS)
-    # 1. Vodilni slog: UPNQR
-    # 2-8. Plačnik (prazno razen imena/naslova)
-    # 9. Znesek (11 mest, centi)
-    # 10. Datum plačila (DD.MM.YYYY, neobvezno)
-    # 11. Nujno (prazno)
-    # 12. Koda namena (OTHR)
-    # 13. Namen plačila (42 znakov)
-    # 14. Rok plačila (DD.MM.YYYY)
-    # 15. IBAN prejemnika
-    # 16. Reference prejemnika (SI12 + stevilka + kontrolna)
-    # 17. Ime prejemnika
-    # 18. Naslov prejemnika
-    # 19. Kraj prejemnika
-    # 20. Kontrolna vsota (strlen(1..19) + 19)
+    odstotek = invoice_data.get('odstotek_placila', 100)
+    if odstotek is None: odstotek = 100
+    try: odstotek = float(odstotek)
+    except: odstotek = 100
     
-    iban = company_data.get('trr', '').replace(' ', '')
-    cents = int(round(invoice_data.get('znesek_skupaj', 0) * 100))
-    amount_str = f"{cents:011d}"
-    
-    # Podatki prejemnika (naše podjetje) - omejimo na 42 znakov
-    p_name = company_data.get('naziv', '')[:42]
-    p_address = company_data.get('ulica', '')[:42]
-    p_city = company_data.get('posta_kraj', '')[:42]
-    
-    # Podatki plačnika (partner) - omejimo na 42 znakov
-    c_name = partner_data.get('naziv', '')[:42]
-    c_address = partner_data.get('ulica', '')[:42]
-    c_city = f"{partner_data.get('postna_stevilka', '')} {partner_data.get('kraj', '')}"[:42]
-    
-    # Sestavimo prvih 19 polj po vrstnem redu ZBS standarda
-    vsebina_qr = [
-        "UPNQR",            # 1. Glava
-        "",                 # 2. IBAN plačnika
-        "",                 # 3. Polog
-        "",                 # 4. Dvig
-        "",                 # 5. Referenca plačnika
-        c_name,             # 6. Ime plačnika
-        c_address,          # 7. Naslov plačnika
-        c_city,             # 8. Kraj plačnika
-        amount_str,         # 9. Znesek
-        "",                 # 10. Datum plačila
-        "",                 # 11. Nujno
-        "OTHR",             # 12. Koda namena
-        f"Placilo racuna {invoice_data.get('stevilka', '')}"[:42], # 13. Namen
-        ".".join(invoice_data.get('datum_zapadlosti', '').split('-')[::-1]) if invoice_data.get('datum_zapadlosti') else "", # 14. Rok plačila (DD.MM.YYYY)
-        iban,               # 15. IBAN prejemnika
-        f"SI12{sklic_poln}", # 16. Referenca prejemnika
-        p_name,             # 17. Ime prejemnika
-        p_address,          # 18. Naslov prejemnika
-        p_city              # 19. Kraj prejemnika
-    ]
-    
-    # Izračun kontrolne vsote (polje 20) po ZBS standardu:
-    # Vsota dolžin v BAJTIH (ISO-8859-2) prvih 19 polj + 19 ločil (LF)
-    # Rezultat mora biti 3-mestno število z vodilnimi ničlami.
-    vsota_dolzin = sum(len(f.encode('iso-8859-2', errors='replace')) for f in vsebina_qr)
-    kontrolna_vsota = vsota_dolzin + 19
-    
-    # Dodamo 20. polje (kontrolna vsota, 3 mesta z vodilnimi ničlami)
-    vsebina_qr.append(f"{kontrolna_vsota:03d}")
-    
-    # ZDRUŽIMO Z \n (ASCII 10) in ENKODIRAMO V ISO-8859-2
-    qr_data_string = "\n".join(vsebina_qr)
-    qr_data_bytes = qr_data_string.encode('iso-8859-2', errors='replace')
-    
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(qr_data_bytes)
-    qr.make(fit=True)
-    
-    img = qr.make_image(fill_color="black", back_color="white")
-    
-    # Shrani v začasno datoteko
-    fd, temp_path = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    img.save(temp_path)
-    
-    # Izris QR kode na sredino (X=85 za 40x40 sliko)
-    pdf.ln(5)
-    pdf.image(temp_path, x=85, w=40)
-    
-    # Brisanje začasne QA slike
-    try:
-        os.remove(temp_path)
-    except:
-        pass
+    if v_placilo:
+        pdf.set_font('DejaVu', 'B', 8)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 4, 'Plačilni podatki:', ln=1)
+        pdf.set_font('DejaVu', '', 8)
+        pdf.cell(0, 4, f"IBAN: {company_data.get('trr', '')}", ln=1)
+        pdf.cell(0, 4, f"Banka: {company_data.get('banka', '')}", ln=1)
+        
+        if odstotek < 100:
+            znesek_delni = invoice_data.get('znesek_skupaj', 0) * (odstotek / 100)
+            pdf.cell(0, 4, f"Znesek za plačilo ({odstotek}%): {format_money(znesek_delni)}", ln=1)
+
+        # SI00 in QR koda
+        raw_num = "".join(filter(str.isdigit, invoice_data.get('stevilka', '')))
+        # SI00 model ne zahteva kontrolne številke
+        sklic_poln = raw_num
+        pdf.cell(0, 4, f"Pri plačilu uporabite referenco plačila: SI00 {sklic_poln}", ln=1)
+        
+        # UPN-QR generiranje (Uradni slovenski standard ZBS)
+        iban = company_data.get('trr', '').replace(' ', '')
+        # Upoštevamo odstotek plačila za QR kodo
+        znesek_za_qr = invoice_data.get('znesek_skupaj', 0) * (odstotek / 100)
+        cents = int(round(znesek_za_qr * 100))
+        amount_str = f"{cents:011d}"
+        
+        # Podatki prejemnika (naše podjetje) - omejimo na 42 znakov
+        p_name = company_data.get('naziv', '')[:42]
+        p_address = company_data.get('ulica', '')[:42]
+        p_city = company_data.get('posta_kraj', '')[:42]
+        
+        # Podatki plačnika (partner) - omejimo na 42 znakov
+        c_name = partner_data.get('naziv', '')[:42]
+        c_address = partner_data.get('ulica', '')[:42]
+        c_city = f"{partner_data.get('postna_stevilka', '')} {partner_data.get('kraj', '')}"[:42]
+        
+        # Sestavimo prvih 19 polj po vrstnem redu ZBS standarda
+        vsebina_qr = [
+            "UPNQR",            # 1. Glava
+            "",                 # 2. IBAN plačnika
+            "",                 # 3. Polog
+            "",                 # 4. Dvig
+            "",                 # 5. Referenca plačnika
+            c_name,             # 6. Ime plačnika
+            c_address,          # 7. Naslov plačnika
+            c_city,             # 8. Kraj plačnika
+            amount_str,         # 9. Znesek
+            "",                 # 10. Datum plačila
+            "",                 # 11. Nujno
+            "OTHR",             # 12. Koda namena
+            f"Placilo racuna {invoice_data.get('stevilka', '')}"[:42], # 13. Namen
+            ".".join(invoice_data.get('datum_zapadlosti', '').split('-')[::-1]) if invoice_data.get('datum_zapadlosti') else "", # 14. Rok plačila (DD.MM.YYYY)
+            iban,               # 15. IBAN prejemnika
+            f"SI00{sklic_poln}", # 16. Referenca prejemnika
+            p_name,             # 17. Ime prejemnika
+            p_address,          # 18. Naslov prejemnika
+            p_city              # 19. Kraj prejemnika
+        ]
+        
+        vsota_dolzin = sum(len(f.encode('iso-8859-2', errors='replace')) for f in vsebina_qr)
+        kontrolna_vsota = vsota_dolzin + 19
+        vsebina_qr.append(f"{kontrolna_vsota:03d}")
+        
+        qr_data_string = "\n".join(vsebina_qr)
+        qr_data_bytes = qr_data_string.encode('iso-8859-2', errors='replace')
+        
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qr_data_bytes)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        fd, temp_path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        img.save(temp_path)
+        
+        pdf.ln(5)
+        pdf.image(temp_path, x=85, w=40)
+        
+        try:
+            os.remove(temp_path)
+        except:
+            pass
     
     return pdf.output()
 
@@ -1099,8 +1060,17 @@ def test_smtp(n: Nastavitve):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Napaka pri povezavi: {str(e)}")
 
+@app.get("/api/email_log")
+def get_email_log():
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM email_log ORDER BY poslano_at DESC LIMIT 100")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
 @app.post("/api/dokumenti/send_email/{id}")
-def send_email_invoice(id: int):
+def send_email_invoice(id: int, request: EmailRequest = None):
     conn = database.get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM dokumenti WHERE id = ?", (id,))
@@ -1110,8 +1080,8 @@ def send_email_invoice(id: int):
         raise HTTPException(status_code=404, detail="Dokument ne obstaja")
     
     cursor.execute("SELECT * FROM partnerji WHERE id = ?", (inv['partner_id'],))
-    partner = cursor.fetchone()
-    if not partner or not partner.get('email'):
+    partner_row = cursor.fetchone()
+    if not partner_row or not partner_row['email']:
         conn.close()
         raise HTTPException(status_code=400, detail="Partner nima vnesenega e-naslova.")
         
@@ -1119,14 +1089,20 @@ def send_email_invoice(id: int):
     items = [dict(r) for r in cursor.fetchall()]
     
     cursor.execute("SELECT * FROM nastavitve WHERE id = 1")
-    company = cursor.fetchone()
+    company_row = cursor.fetchone()
     conn.close()
+    
+    if not company_row:
+        raise HTTPException(status_code=500, detail="Nastavitve niso najdene v bazi.")
+    
+    company = dict(company_row)
+    partner = dict(partner_row)
     
     if not company.get('smtp_server') or not company.get('smtp_port') or not company.get('smtp_username') or not company.get('smtp_password'):
         raise HTTPException(status_code=400, detail="SMTP nastavitve niso izpolnjene v Nastavitvah.")
         
     try:
-        pdf_content = generate_pdf_invoice(dict(inv), dict(company), dict(partner), items)
+        pdf_content = generate_pdf_invoice(dict(inv), company, partner, items)
         
         doc_title = "Racun"
         if inv['tip'] == 'ponudbe':
@@ -1141,12 +1117,44 @@ def send_email_invoice(id: int):
         msg['To'] = partner['email']
         msg['Subject'] = f"{doc_title} št. {inv['stevilka']} - {company.get('naziv', '')}"
         
-        body = f"Spoštovani,\n\nv priponki vam pošiljamo dokument {doc_title} št. {inv['stevilka']}.\n\nLep pozdrav,\n{company.get('naziv', '')}"
+        # Uporaba predloge besedila
+        template = ""
+        if inv['tip'] == 'izdani_racuni':
+            template = company.get('email_template_racun')
+        elif inv['tip'] == 'ponudbe':
+            template = company.get('email_template_ponudba')
+        elif inv['tip'] == 'dobropisi':
+            template = company.get('email_template_dobropis')
+            
+        if not template:
+            body = f"Spoštovani,\n\nv priponki vam pošiljamo dokument {doc_title} št. {inv['stevilka']}.\n\nLep pozdrav,\n{company.get('naziv', '')}"
+        else:
+            # Osnovna zamenjava placeholderjev
+            body = template.replace("{stevilka}", str(inv['stevilka']))
+            body = body.replace("{tip}", doc_title)
+            body = body.replace("{podjetje}", company.get('naziv', ''))
+            
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
         part = MIMEApplication(pdf_content, Name=filename)
         part['Content-Disposition'] = f'attachment; filename="{filename}"'
         msg.attach(part)
+        
+        # Dodajanje izbranih prilog
+        if request and request.priloge_ids:
+            conn = database.get_db()
+            cursor = conn.cursor()
+            for p_id in request.priloge_ids:
+                cursor.execute("SELECT * FROM priloge WHERE id = ?", (p_id,))
+                p_row = cursor.fetchone()
+                if p_row:
+                    p_path = UPLOADS_DIR / p_row['filename']
+                    if p_path.exists():
+                        with open(p_path, "rb") as f:
+                            p_part = MIMEApplication(f.read(), Name=p_row['original_name'])
+                            p_part['Content-Disposition'] = f'attachment; filename="{p_row["original_name"]}"'
+                            msg.attach(p_part)
+            conn.close()
         
         if company['smtp_use_tls']:
             server = smtplib.SMTP(company['smtp_server'], int(company['smtp_port']), timeout=10)
@@ -1162,8 +1170,29 @@ def send_email_invoice(id: int):
             server.send_message(msg)
             server.quit()
             
+        # Logiranje uspešnega pošiljanja
+        conn = database.get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO email_log (dokument_id, tip_dokumenta, stevilka_dokumenta, prejemnik, zadeva, status, poslano_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (id, inv['tip'], inv['stevilka'], partner['email'], msg['Subject'], 'success', get_now_slo()))
+        conn.commit()
+        conn.close()
+            
         return {"status": "success", "message": "E-pošta je bila uspešno poslana."}
     except Exception as e:
+        # Logiranje napake
+        try:
+            conn = database.get_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO email_log (dokument_id, tip_dokumenta, stevilka_dokumenta, prejemnik, zadeva, status, napaka, poslano_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (id, inv['tip'], inv['stevilka'], partner['email'], f"{doc_title} št. {inv['stevilka']}", 'error', str(e), get_now_slo()))
+            conn.commit()
+            conn.close()
+        except: pass
         raise HTTPException(status_code=500, detail=f"Napaka pri pošiljanju: {str(e)}")
 
 def parse_eslog_xml(xml_data):
@@ -1562,8 +1591,8 @@ async def _save_imported_eslog(data):
                 f.write(file_content)
             
             cursor.execute(
-                "INSERT INTO priloge (parent_type, parent_id, filename, original_name) VALUES (?, ?, ?, ?)",
-                ('dokumenti', doc_id, unique_name, data['file_name'])
+                "INSERT INTO priloge (parent_type, parent_id, filename, original_name, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+                ('dokumenti', doc_id, unique_name, data['file_name'], get_now_slo())
             )
         
         # 4. Postavke
@@ -1660,8 +1689,8 @@ def _add_attachment(parent_type, parent_id, filename, content):
     conn = database.get_db()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO priloge (parent_type, parent_id, filename, original_name) VALUES (?, ?, ?, ?)",
-        (parent_type, parent_id, unique_name, filename)
+        "INSERT INTO priloge (parent_type, parent_id, filename, original_name, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+        (parent_type, parent_id, unique_name, filename, get_now_slo())
     )
     conn.commit()
     conn.close()
@@ -1757,78 +1786,296 @@ def extract_aliexpress_png(content):
         }]
     }
 
-def extract_temu_pdf(content):
+def extract_generic_pdf(content):
+    """Generični parser PDF računov - deluje z večino SLO in tujih dobaviteljev."""
     pdf_text = ""
     try:
         with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for page in pdf.pages: pdf_text += page.extract_text() + "\n"
+            for page in pdf.pages:
+                txt = page.extract_text()
+                if txt: pdf_text += txt + "\n"
     except Exception as e:
         print(f"PDF Error: {e}")
-            
-    order_id_match = re.search(r'(PO-\d{3}-\d+)', pdf_text)
-    order_id = order_id_match.group(1) if order_id_match else "Neznano"
-    
-    m_map = {'Jan':'01','Feb':'02','Mar':'03','Apr':'04','May':'05','Jun':'06','Jul':'07','Aug':'08','Sep':'09','Oct':'10','Nov':'11','Dec':'12'}
-    order_date = datetime.now().strftime("%Y-%m-%d")
-    
-    pats = [
-        r'Order Date:\s*([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{4})',
-        r'Order Date:\s*(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})',
-        r'([A-Za-z]{3})\s+(\d{1,2})[,\.\s]+(\d{4})'
-    ]
-    for pat in pats:
-        m = re.search(pat, pdf_text)
-        if m:
-            try:
-                g = m.groups()
-                if '([A-Za-z]' in pat:
-                    mm, d, y = g[0][:3].capitalize(), g[1].zfill(2), g[2]
-                    if mm in m_map: order_date = f"{y}-{m_map[mm]}-{d}"
-                elif '(\\d{1,2})\\s+([A-Za-z]' in pat:
-                    d, mm, y = g[0].zfill(2), g[1][:3].capitalize(), g[2]
-                    if mm in m_map: order_date = f"{y}-{m_map[mm]}-{d}"
-                break
-            except: continue
+
+    if not pdf_text.strip():
+        return None  # Skenirani/slikovni PDF - ni besedila
         
-    total_match = re.search(r'(?:Order total:|Item\(s\) total:)[^\d]*([\d]+[\.,][\d]{2})', pdf_text, re.IGNORECASE)
-    if total_match: total_val = float(total_match.group(1).replace(',', '.'))
+    # Globalno čiščenje problematičnih znakov (Artlist em-dash sredi besed, itd.)
+    pdf_text = pdf_text.replace('\u2014', '').replace('\u2013', '-')
+
+    def cn(s):
+        """Pretvori evropski format številke v float."""
+        if not s: return 0.0
+        s = s.strip().rstrip('€').strip()
+        if ',' in s and '.' in s:
+            s = s.replace('.', '').replace(',', '.') if s.rfind(',') > s.rfind('.') else s.replace(',', '')
+        elif ',' in s:
+            s = s.replace(',', '.')
+        try: return round(float(s), 2)
+        except: return 0.0
+
+    def pd(raw):
+        """Pretvori niz datuma v YYYY-MM-DD."""
+        if not raw: return datetime.now().strftime("%Y-%m-%d")
+        raw = raw.strip()
+        mm = {'jan':'01','feb':'02','mar':'03','apr':'04','maj':'05','may':'05',
+              'jun':'06','jul':'07','avg':'08','aug':'08','sep':'09',
+              'okt':'10','oct':'10','nov':'11','dec':'12'}
+        m = re.search(r'(\d{1,2})[.\s]+(\d{1,2})[.\s]+(\d{4})', raw)
+        if m: return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+        m = re.search(r'(\d{1,2})[.\s]+([a-z]{3})[.\s]+(\d{4})', raw, re.I)
+        if m and m.group(2).lower() in mm: return f"{m.group(3)}-{mm[m.group(2).lower()]}-{m.group(1).zfill(2)}"
+        m = re.search(r'([A-Za-z]{3,9})\s+(\d{1,2})[,.]?\s+(\d{4})', raw)
+        if m and m.group(1).lower()[:3] in mm: return f"{m.group(3)}-{mm[m.group(1).lower()[:3]]}-{m.group(2).zfill(2)}"
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def first_match(patterns, text):
+        for pat in patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                v = m.group(1).strip()
+                if v: return v
+        return ""
+
+    # ---- ŠTEVILKA RAČUNA ----
+    stevilka = first_match([
+        r'(?:Številka\s+ra[cč]una\s*:\s*|Številka\s+dokumenta\s*:\s*)([A-Z0-9][A-Z0-9\-_/\.]{1,30})',
+        r'(?:Invoice\s+#\s*|Invoice\s+No\.?\s*:?\s*)([A-Z0-9][\w\-]{1,30})',
+        r'(?:Interna\s+številka\s+dok\.\s*:\s*)([A-Z0-9][\w\-]{1,20})',
+        r'(?:RA[CČ]UN\s+ŠT\.|Ra[cč]un\s+(?:št\.|#))\s*:?\s*([A-Z0-9][\w\-/\.]{1,30})',
+        r'(?<![a-zA-Z])(?:Številka|Stevilka)\s*:\s*([A-Z0-9][\w/\-\.]{1,20})',
+        r'RAČUN\s+([0-9]+/[0-9]+)',  # BM Racun
+        r'RA\s*UN[^\d]+([1-9][A-Z0-9\-_/\.]{5,20})',  # Tuli
+        r'Interna\s+številka\s+([\w\-]{3,25})',
+        r'(?:Vaša\s+oznaka.*?Št\.\s+računa.*?)(\d[\w\-/\.]{3,20})(?:\s+\d)',  # Conrad
+    ], pdf_text)
+    if not stevilka or len(stevilka) < 2: stevilka = "Neznano"
+
+    # ---- DATUM RAČUNA ----
+    datum_raw = first_match([
+        r'(?:Datum\s+(?:in\s+ura\s+)?ra[cč]una|Datum\s+dokumenta)\s*[:\s,]+\s*(\d{1,2}[.\s]+\d{1,2}[.\s]+\d{4})',
+        r'(?:Datum\s+izdaje)\s*[:\s]+\n?(\d{1,2}\.\s*\d{1,2}\.\s*\d{4})',
+        r'(?:Invoice\s+Date)\s+[A-Z]?\u2014?([A-Za-z]{2,9}\s+\d{1,2}[,.]?\s+\d{4})',  # Artlist
+        r'(?:Datum:\s*)(\d{1,2}\.\d{1,2}\.\d{4})',
+        # Google oblika: "31. jan. 2026"
+        r'(\d{1,2}\.\s+[a-z]{3}\.\s+\d{4})',
+        # Tuli: "Datum ra una: 12.01.2026 ob"
+        r'Datum\s+ra\s*una:\s*(\d{1,2}\.\d{2}\.\d{4})',
+        # IKEA/BM fallback: DD. M. YYYY ali DD.MM.YYYY v dokumentu
+        r'(\d{2}\.\d{2}\.\d{4})\s+(?:\d{2}:\d{2})',
+        r',\s*(\d{1,2}\.\d{1,2}\.\d{4})',  # BM: Celje, 26.01.2026
+    ], pdf_text)
+    datum_izdaje = pd(datum_raw)
+
+    # ---- DATUM ZAPADLOSTI ----
+    zap_raw = first_match([
+        r'(?:Zapadlost\s+ra[cč]una|Zapadlost|Datum\s+valute|VALUTA)\s*[:\s]+(\d{1,2}[.\s]+\d{1,2}[.\s]+\d{4})',
+        r'(?:Zapadlost:)\s*(\d{1,2}\.\d{1,2}\.\d{4})',
+    ], pdf_text)
+    datum_zapadlosti = pd(zap_raw) if zap_raw else datum_izdaje
+
+    # ---- SKUPNI ZNESEK ----
+    total_val = 0.0
+    for pat in [
+        r'(?:Za\s+pla[cč]ilo\s+EUR\s*:|ZA\s+PLA[CČ]ILO[:\s]*EUR)[:\s€]*([0-9]+[,\.][0-9]{2})',
+        r'(?:Za\s+pla[cč]ilo\s+EUR\s*:?)\s+([0-9]+[,\.][0-9]{2})',
+        r'Skupaj\s+za\s+pla[cč]ilo\s+EUR\s+([0-9]+[,\.][0-9]{2})',
+        r'(?:Skupaj\s+za\s+pla[cč]ilo)[:\s€]*([0-9]+[,\.][0-9]{2})',
+        r'(?:Skupni\s+znesek(?:\s+v\s+valuti\s+EUR)?)[:\s€]*([0-9]+[,\.][0-9]{2})',
+        r'(?:Pla[cč]ano|PLA.ANO)[:\s€]*([0-9]+[,\.][0-9]{2})\s+EUR',  # Temu/Tuli
+        r'SKUPAJ\s+RA[^\s]*\s*UN\s+EUR\s+([0-9]+[,\.][0-9]{2})',  # Tuli encoding
+        r'N\s+ZA\s+PLA[^\s]*\s*ILO\s+EUR\s+([0-9]+[,\.][0-9]{2})',  # Tuli encoding
+        r'(?:Invoice\s+Amou[n\u2014\-]*t)[:\s€]*([0-9]+[,\.][0-9]{2})',
+        r'(?:Total)[:\s]*([0-9]+[,\.][0-9]{2})\s*€',
+        r'([0-9]+[,\.][0-9]{2})\s+Za\s+pla[cč]ilo\s+EUR',  # GMT
+    ]:
+        m = re.search(pat, pdf_text, re.IGNORECASE)
+        if m:
+            v = cn(m.group(1))
+            if v > 0: total_val = v; break
+
+    # Fallback: DDV rekapitulacija
+    if total_val == 0:
+        tbl = re.search(r'(?:Skupaj|Total)\s+[0-9,\.]+\s+[0-9,\.]+\s+([0-9]+[,\.][0-9]{2})', pdf_text, re.IGNORECASE)
+        if tbl: total_val = cn(tbl.group(1))
+    # Fallback2: max znesek z EUR simbolom v dokumentu
+    if total_val == 0:
+        all_eur = re.findall(r'([0-9]+[,\.][0-9]{2})\s*(?:EUR|€)', pdf_text)
+        if all_eur:
+            total_val = max(cn(x) for x in all_eur)
+
+    # ---- OSNOVA (BREZ DDV) ----
+    net_val = 0.0
+    for pat in [
+        r'(?:Neto\s+znesek|Znesek\s+brez\s+DDV|VREDNOST\s+brez\s+DDV|Skupaj\s+brez\s+DDV)\s*[:\s€]*([0-9]+[,\.][0-9]{2})',
+        r'DDV\s+22[,\.]0+%\s+od\s+osnove\s+([0-9]+[,\.][0-9]{2})',
+        r'(?:Osnova\s+za\s+DDV|Osnova\s+DDV)\s*[:\s]*([0-9]+[,\.][0-9]{2})',
+        r'Stopnja\s+22[,\.]?0?\s*%\s+([0-9]+[,\.][0-9]{2})',
+        r'(?:D[01]\s+-[^0-9]+(?:22|0)[,\.]?0*%)\s+([0-9]+[,\.][0-9]{2})',
+        # Shopster: DDV rekapitulacija tabela "22 % 36,60 8,05 44,65"
+        r'22\s*%\s+([0-9]+[,\.][0-9]{2})\s+[0-9]+[,\.][0-9]{2}\s+[0-9]+[,\.][0-9]{2}',
+        # GMT: Osnova DDV v tabeli DAVČNE STOPNJE
+        r'22%\s+([0-9]+[,\.][0-9]{2})\s+[0-9]+[,\.][0-9]{2}\s+[0-9]+[,\.][0-9]{2}',
+    ]:
+        m = re.search(pat, pdf_text, re.IGNORECASE)
+        if m:
+            v = cn(m.group(1))
+            if v > 0: net_val = v; break
+
+    # ---- DDV ZNESEK ----
+    vat_val = 0.0
+    for pat in [
+        r'DDV\s+\(?22[,\.]0?%?\)?\s+([0-9]+[,\.][0-9]{2})',
+        r'DDV\s+22[,\.]\d+%?\s+(?:od\s+osnove\s+[0-9,\.]+\s+EUR\s+)?([0-9]+[,\.][0-9]{2})',
+        r'(?:Znesek\s+davka|Znesek\s+DDV)\s+([0-9]+[,\.][0-9]{2})',
+        r'22\s*%\s+[0-9,\.]+\s+([0-9]+[,\.][0-9]{2})',
+    ]:
+        m = re.search(pat, pdf_text, re.IGNORECASE)
+        if m:
+            v = cn(m.group(1))
+            if v > 0: vat_val = v; break
+
+    # Posebni primeri: 0% DDV (reverse charge - Google Ads, Artlist)
+    explicit_zero_vat = bool(re.search(r'DDV\s*\(0%\)|0%.*reverse\s+charge|VAT\s+Exemption|self.account.*VAT', pdf_text, re.I))
+
+    # Izračun manjkajočih vrednosti
+    if total_val > 0 and net_val == 0 and vat_val == 0:
+        if explicit_zero_vat:
+            net_val = total_val  # 0% DDV
+        else:
+            net_val = round(total_val / 1.22, 2); vat_val = round(total_val - net_val, 2)
+    elif total_val > 0 and net_val > 0 and vat_val == 0 and not explicit_zero_vat:
+        vat_val = round(total_val - net_val, 2)
+    elif total_val == 0 and net_val > 0:
+        total_val = round(net_val + vat_val, 2)
+
+    # ---- DOBAVITELJ (PARTNER) ----
+    # Poišči ID za DDV dobavitelja (izključi kupčevo SI11648236)
+    partner_naziv = "Neznan dobavitelj"
+    partner_davcna = ""
+    partner_drzava = "Slovenija"
+
+    # Znani tuji dobavitelji
+    if re.search(r'google\s+ireland|google\s+ads', pdf_text, re.I):
+        partner_naziv = "Google Ireland Limited"; partner_davcna = "IE6388047V"; partner_drzava = "Irska"
+    elif re.search(r'artlist', pdf_text, re.I):
+        partner_naziv = "Artlist UK Ltd"; partner_davcna = "GB770403942"; partner_drzava = "Združeno kraljestvo"
+    elif re.search(r'PO-\d{3}-\d+|temu\.com', pdf_text, re.I):
+        partner_naziv = "Temu"; partner_drzava = "Kitajska"
+    elif re.search(r'aliexpress', pdf_text, re.I):
+        partner_naziv = "Aliexpress"; partner_drzava = "Kitajska"
     else:
-        all_amounts = re.findall(r'([\d]+[\.,][\d]{2})\s*€', pdf_text)
-        total_val = max([float(x.replace(',', '.')) for x in all_amounts]) if all_amounts else 0.00
-            
-    vat_match = re.search(r'Includes VAT of[^\d]*([\d]+[\.,][\d]{2})', pdf_text, re.IGNORECASE)
-    if vat_match:
-        vat_val = float(vat_match.group(1).replace(',', '.'))
-        base_val = total_val - vat_val
-    else:
-        base_val = total_val / 1.22
-        vat_val = total_val - base_val
+        # SLO dobavitelji: ID za DDV iz prve SI... številke ki ni kupčeva
+        vat_matches = re.findall(r'(?:ID\s+(?:za|za:)\s+DDV|ID\s+DDV|Za\s+DDV)[:\s]+SI(\d{8})', pdf_text, re.I)
+        for v in vat_matches:
+            if v != '11648236':  # Izključi kupčevo DAV
+                partner_davcna = v; break
+
+        # Posebni primeri dobaviteljev na podlagi celotnega besedila
+        tl = pdf_text.lower()
+        if 'mimovrste' in tl: partner_naziv = "Mimovrste d.o.o."
+        elif 'shoppster' in tl: partner_naziv = "Shoppster d.o.o."
+        elif 'ikea' in tl: partner_naziv = "IKEA Slovenija d.o.o."
+        elif 'bauhaus' in tl: partner_naziv = "BAUHAUS d.o.o."
+        elif 'conrad' in tl: partner_naziv = "Conrad Electronic d.o.o."
+        elif 'b&m' in tl or 'eloksiranje' in tl: partner_naziv = "ELOKSIRANJE B&M d.o.o."
+        elif 'gmt' in tl: partner_naziv = "GMT d.o.o."
+        
+        if partner_naziv == "Neznan dobavitelj":
+            # Ime dobavitelja: prve vrstice dokumenta (pred kupcem)
+            lines = [l.strip() for l in pdf_text.split('\n') if l.strip()]
+            buyer_keywords = ['miha kadiš', 'sim 83', 'simulatorji', 'dobja vas 253', 'kadiš s.p', 'kupec',
+                              'stran 1', 'stran 2', 'stran\xa0', 'st.kopije', 'št.kopije', 'račun za gosta',
+                              'dobavitelj:', 'račun', 'sklicna', 'konstantni', 'ra\u010dun', 's.p. celje', 'ravne na koro']
+            company_keywords = ['d.o.o', 'd.d.', 's.p.', 'k.d.', 'ltd', 'limited', 'gmbh', 'inc']
+            skip_starts = ('Tel', 'Fax', 'E-po', 'info@', 'www.', 'Stran', 'ZOI', 'EOR', 'IBAN', 'Mat', 'ID', 'Kontaktni', 'Datum', 'Valuta')
+            for line in lines[:25]:
+                ll = line.lower()
+                if any(k in ll for k in buyer_keywords): continue
+                if len(line) < 4: continue
+                if re.match(r'^[\d\s\.\-:/]+$', line): continue
+                if line.startswith(skip_starts): continue
+                
+                if any(k in ll for k in company_keywords):
+                    partner_naziv = line
+                    break
+                if partner_davcna and len(line) > 5 and not any(k in ll for k in ['slovenija', 'ljubljana', 'celje']):
+                    partner_naziv = line
+                    break
+
+    stopnja_ddv = 0 if vat_val == 0 else 22
+    
+    # Hevristični poizkus branja postavk računa (Količina * Cena = Skupaj)
+    postavke = []
+    try:
+        for line in pdf_text.split('\n'):
+            line = line.strip()
+            if len(line) < 10: continue
+            # Preskoči vrstice ki vsebujejo ključne besede za rekapitulacijo
+            if re.search(r'(skupaj|ddv|pla[cč]ilo|znesek|osnova|popust|zapadlost|valuta|stran|iban)', line, re.I): continue
+            m = re.search(r'^(.+?)\s+(\d+[,\.]?\d*)\s*(?:kos|kg|m|kom|ur|h|uro|ura|kosa|kosi|kosov|lit|l|par|kpl|x|)\s+(\d+[,\.]\d{2,4})\s+(\d+[,\.]\d{2,4})\s*$', line, re.I)
+            if m:
+                opis = m.group(1).strip()
+                kol = cn(m.group(2))
+                cena = cn(m.group(3))
+                sk = cn(m.group(4))
+                
+                # Sanity check: Količina * Cena enote = Skupaj (+- 5 centov)
+                if kol > 0 and cena > 0 and abs((kol * cena) - sk) <= 0.05:
+                    postavke.append({
+                        "opis": opis,
+                        "kolicina": kol,
+                        "cena_enote": cena,
+                        "stopnja_ddv": stopnja_ddv,
+                        "znesek_skupaj": sk
+                    })
+    except:
+        pass
+
+    # Prilagoditev: Če so izluščene postavke brez DDV (njihova vsota je blizu net_val), 
+    # jim dodamo DDV, saj naša aplikacija pričakuje cene z DDV!
+    if postavke and stopnja_ddv > 0:
+        sum_skupaj = sum(p["znesek_skupaj"] for p in postavke)
+        if abs(sum_skupaj - net_val) < abs(sum_skupaj - total_val):
+            for p in postavke:
+                p["cena_enote"] = round(p["cena_enote"] * (1 + stopnja_ddv / 100), 4)
+                p["znesek_skupaj"] = round(p["znesek_skupaj"] * (1 + stopnja_ddv / 100), 2)
+
+    # Fallback na generično postavko, če heuristika ni našla nič pametnega
+    if not postavke:
+        postavke = [{
+            "opis": f"Uvoz računa {stevilka}",
+            "kolicina": 1,
+            "cena_enote": net_val,
+            "stopnja_ddv": stopnja_ddv,
+            "znesek_skupaj": total_val,
+        }]
 
     return {
-        "stevilka": order_id,
-        "datum_izdaje": order_date,
-        "datum_zapadlosti": order_date,
-        "datum_storitve_od": order_date,
-        "datum_storitve_do": order_date,
+        "stevilka": stevilka,
+        "datum_izdaje": datum_izdaje,
+        "datum_zapadlosti": datum_zapadlosti,
+        "datum_storitve_od": datum_izdaje,
+        "datum_storitve_do": datum_izdaje,
         "partner": {
-            "naziv": "Temu",
-            "davcna_stevilka": "",
-            "ulica": "", "postna_stevilka": "", "kraj": "", "drzava": "Kitajska",
-            "zavezanec_za_ddv": False
+            "naziv": partner_naziv,
+            "davcna_stevilka": partner_davcna,
+            "ulica": "", "postna_stevilka": "", "kraj": "",
+            "drzava": partner_drzava,
+            "zavezanec_za_ddv": bool(partner_davcna),
         },
         "znesek_skupaj": total_val,
-        "znesek_brez_ddv": round(base_val, 2),
-        "znesek_ddv": round(vat_val, 2),
+        "znesek_brez_ddv": net_val,
+        "znesek_ddv": vat_val,
         "valuta": "EUR",
         "tecaj": 1.0,
-        "postavke": [{
-            "opis": f"Nakup Temu {order_id}",
-            "kolicina": 1,
-            "cena_enote": total_val,
-            "stopnja_ddv": 22,
-            "znesek_skupaj": total_val
-        }]
+        "placan": False,
+        "postavke": postavke
     }
+
+def extract_temu_pdf(content):
+    """Ohranjena za nazaj-kompatibilnost — kliče generični parser."""
+    return extract_generic_pdf(content)
 
 # --- DOKUMENTI ---
 class DokumentPostavka(BaseModel):
@@ -1862,6 +2109,8 @@ class Dokument(BaseModel):
     valuta: Optional[str] = "EUR"
     tecaj: Optional[float] = 1.0
     znesek_v_valuti: Optional[float] = 0.0
+    vkljuci_placilo: Optional[bool] = True
+    odstotek_placila: Optional[float] = 100.0
     postavke: List[DokumentPostavka]
 
 @app.delete("/api/dokumenti/{id}")
@@ -1888,6 +2137,7 @@ def get_dokumenti(tip: str):
     cursor.execute("""
         SELECT d.*, p.naziv as partner_naziv,
         (SELECT EXISTS(SELECT 1 FROM priloge WHERE parent_type = 'dokumenti' AND parent_id = d.id)) as ima_prilogo,
+        (SELECT MAX(poslano_at) FROM email_log WHERE dokument_id = d.id AND status = 'success') as zadnje_poslano,
         IFNULL((SELECT SUM(znesek) FROM placila_povezave WHERE dokument_id = d.id), 0) as placano_znesek
         FROM dokumenti d
         LEFT JOIN partnerji p ON d.partner_id = p.id
@@ -1909,10 +2159,14 @@ def get_dokument_detajl(id: int):
     
     cursor.execute("SELECT * FROM dokumenti_postavke WHERE dokument_id = ?", (id,))
     items = cursor.fetchall()
+    
+    cursor.execute("SELECT MAX(poslano_at) FROM email_log WHERE dokument_id = ? AND status = 'success'", (id,))
+    sent_row = cursor.fetchone()
     conn.close()
     
     res = dict(doc)
     res['postavke'] = [dict(i) for i in items]
+    res['zadnje_poslano'] = sent_row[0] if sent_row else None
     return res
 
 @app.post("/api/dokumenti")
@@ -1948,9 +2202,9 @@ def create_dokument(doc: Dokument):
         stevilka = f"{next_num:03d}-{doc.poslovno_leto}"
     
     cursor.execute("""
-        INSERT INTO dokumenti (poslovno_leto, tip, stevilka, partner_id, datum_izdaje, datum_zapadlosti, znesek_brez_ddv, znesek_ddv, znesek_skupaj, datum_storitve_od, datum_storitve_do, status, datum_placila, nacin_placila, zakljucno_besedilo, noga_dokumenta, opombe, valuta, tecaj, znesek_v_valuti)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (doc.poslovno_leto, doc.tip, stevilka, doc.partner_id, doc.datum_izdaje, doc.datum_zapadlosti, doc.znesek_brez_ddv, doc.znesek_ddv, doc.znesek_skupaj, doc.datum_storitve_od, doc.datum_storitve_do, doc.status, doc.datum_placila, doc.nacin_placila, doc.zakljucno_besedilo, doc.noga_dokumenta, doc.opombe, doc.valuta, doc.tecaj, doc.znesek_v_valuti))
+        INSERT INTO dokumenti (poslovno_leto, tip, stevilka, partner_id, datum_izdaje, datum_zapadlosti, znesek_brez_ddv, znesek_ddv, znesek_skupaj, datum_storitve_od, datum_storitve_do, status, datum_placila, nacin_placila, zakljucno_besedilo, noga_dokumenta, opombe, valuta, tecaj, znesek_v_valuti, vkljuci_placilo, odstotek_placila)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (doc.poslovno_leto, doc.tip, stevilka, doc.partner_id, doc.datum_izdaje, doc.datum_zapadlosti, doc.znesek_brez_ddv, doc.znesek_ddv, doc.znesek_skupaj, doc.datum_storitve_od, doc.datum_storitve_do, doc.status, doc.datum_placila, doc.nacin_placila, doc.zakljucno_besedilo, doc.noga_dokumenta, doc.opombe, doc.valuta, doc.tecaj, doc.znesek_v_valuti, 1 if doc.vkljuci_placilo else 0, doc.odstotek_placila))
     
     doc_id = cursor.lastrowid
     for p in doc.postavke:
@@ -1989,12 +2243,12 @@ def update_dokument(id: int, doc: Dokument):
             poslovno_leto=?, tip=?, stevilka=?, partner_id=?, datum_izdaje=?, datum_zapadlosti=?, 
             znesek_brez_ddv=?, znesek_ddv=?, znesek_skupaj=?, datum_storitve_od=?, datum_storitve_do=?, 
             status=?, datum_placila=?, nacin_placila=?, zakljucno_besedilo=?, noga_dokumenta=?, opombe=?,
-            valuta=?, tecaj=?, znesek_v_valuti=?
+            valuta=?, tecaj=?, znesek_v_valuti=?, vkljuci_placilo=?, odstotek_placila=?
         WHERE id = ?
     """, (doc.poslovno_leto, doc.tip, doc.stevilka, doc.partner_id, doc.datum_izdaje, doc.datum_zapadlosti, 
           doc.znesek_brez_ddv, doc.znesek_ddv, doc.znesek_skupaj, doc.datum_storitve_od, doc.datum_storitve_do, 
           doc.status, doc.datum_placila, doc.nacin_placila, doc.zakljucno_besedilo, doc.noga_dokumenta, doc.opombe,
-          doc.valuta, doc.tecaj, doc.znesek_v_valuti, id))
+          doc.valuta, doc.tecaj, doc.znesek_v_valuti, 1 if doc.vkljuci_placilo else 0, doc.odstotek_placila, id))
     
     # Vstavljanje novih postavk
     for p in doc.postavke:
