@@ -1,16 +1,14 @@
 import sqlite3
 import os
-import contextvars
 
-# ContextVar za varno shranjevanje poti do baze za vsako zahtevo posebej
-_active_db_path = contextvars.ContextVar("active_db_path", default="demo.db")
+DB_NAME = "racunovodstvo.db"
 
 def set_active_db(name):
-    _active_db_path.set(name)
+    global DB_NAME
+    DB_NAME = name
 
 def get_db():
-    path = _active_db_path.get()
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -91,6 +89,7 @@ def init_db():
         znesek REAL,
         koda_namena TEXT,
         konto TEXT,
+        manualna_likvidacija BOOLEAN DEFAULT 0,
         FOREIGN KEY (izpisek_id) REFERENCES izpiski_glava(id),
         FOREIGN KEY (partner_id) REFERENCES partnerji(id)
     );
@@ -115,7 +114,13 @@ def init_db():
         naslov TEXT,
         davcna_stevilka TEXT,
         iban TEXT,
-        delovno_mesto TEXT
+        delovno_mesto TEXT,
+        datum_rojstva DATE,
+        stevilo_otrok INTEGER DEFAULT 0,
+        invalid_ali_nega BOOLEAN DEFAULT 0,
+        delovna_doba_leta INTEGER DEFAULT 0,
+        dopust_odmerjen INTEGER DEFAULT 20,
+        dopust_rocni_popravek INTEGER DEFAULT 0
     );
 
     -- Potni nalogi
@@ -186,7 +191,12 @@ def init_db():
         telefon TEXT,
         spletna_stran TEXT,
         kratko_ime TEXT,
-        dvostavno_knjigovodstvo BOOLEAN DEFAULT 0
+        dvostavno_knjigovodstvo BOOLEAN DEFAULT 0,
+        smtp_server TEXT,
+        smtp_port INTEGER,
+        smtp_username TEXT,
+        smtp_password TEXT,
+        smtp_use_tls BOOLEAN DEFAULT 1
     );
 
     CREATE TABLE IF NOT EXISTS zakljucna_besedila (
@@ -219,14 +229,50 @@ def init_db():
         FOREIGN KEY (izpisek_postavka_id) REFERENCES izpiski_postavke(id),
         FOREIGN KEY (dokument_id) REFERENCES dokumenti(id)
     );
+
+    CREATE TABLE IF NOT EXISTS email_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dokument_id INTEGER,
+        tip_dokumenta TEXT,
+        stevilka_dokumenta TEXT,
+        prejemnik TEXT,
+        zadeva TEXT,
+        poslano_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        status TEXT DEFAULT 'success',
+        napaka TEXT
+    );
     """)
+    # Migracija: Dodaj kratko_ime v nastavitve, če ne obstaja
+    try:
+        cursor.execute("ALTER TABLE nastavitve ADD COLUMN kratko_ime TEXT")
+    except:
+        pass
+
+    # Migracije: Dodaj SMTP nastavitve
+    try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN smtp_server TEXT")
+    except: pass
+    try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN smtp_port INTEGER")
+    except: pass
+    try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN smtp_username TEXT")
+    except: pass
+    try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN smtp_password TEXT")
+    except: pass
+    try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN smtp_use_tls BOOLEAN DEFAULT 1")
+    except: pass
+
     # Migracija: Dodaj vkljuci_placilo in odstotek_placila v dokumenti
     try: cursor.execute("ALTER TABLE dokumenti ADD COLUMN vkljuci_placilo BOOLEAN DEFAULT 1")
     except: pass
     try: cursor.execute("ALTER TABLE dokumenti ADD COLUMN odstotek_placila REAL DEFAULT 100")
     except: pass
 
-    conn.commit()
+    # Migracija: Email predloge
+    try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN email_template_racun TEXT")
+    except: pass
+    try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN email_template_ponudba TEXT")
+    except: pass
+    try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN email_template_dobropis TEXT")
+    except: pass
 
     conn.commit()
     conn.close()
