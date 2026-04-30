@@ -89,6 +89,11 @@ async def session_isolation_middleware(request: Request, call_next):
 def startup():
     database.set_active_db("demo.db")
     database.init_db()
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO nastavitve (id, naziv) VALUES (1, 'Primer Tech d.o.o. (DEMO)')")
+    conn.commit()
+    conn.close()
 
 
 @app.get("/api/companies")
