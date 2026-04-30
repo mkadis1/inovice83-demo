@@ -80,6 +80,48 @@ async def session_isolation_middleware(request: Request, call_next):
 
 
 
+
+
+
+
+
+
+@app.on_event("startup")
+def startup():
+    database.set_active_db("demo.db")
+    database.init_db()
+
+
+@app.get("/api/companies")
+def list_companies():
+    return {"active_id": "demo", "items": [{"id": "demo", "name": "Primer Tech d.o.o. (DEMO)", "db": "demo.db"}]}
+
+@app.post("/api/companies/switch/{company_id}")
+def switch_company(company_id: str):
+    return {"status": "success", "company": {"id": "demo", "name": "Primer Tech d.o.o. (DEMO)", "db": "demo.db"}}
+
+@app.post("/api/companies/create")
+def create_company(data: dict):
+    from fastapi import HTTPException
+    raise HTTPException(status_code=403, detail="Ustvarjanje podjetij ni dovoljeno v demo verziji.")
+
+
+@app.get("/")
+def read_root():
+    from fastapi.responses import HTMLResponse
+    try:
+        with open("static/index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except Exception as e:
+        return HTMLResponse(content=f"<html><body>Napaka pri nalaganju index.html: {str(e)}</body></html>")
+
+@app.get("/api/heartbeat")
+def heartbeat():
+    """Browser pinguje ta endpoint vsakih 5 sekund. Watchdog se resetira."""
+    global _last_heartbeat
+    _last_heartbeat = time.time()
+    return {"ok": True}
+
 # --- Partnerji ---
 class Partner(BaseModel):
     id: Optional[int] = None
