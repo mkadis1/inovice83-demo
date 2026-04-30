@@ -8,7 +8,7 @@ import shutil
 import uuid
 import traceback
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, UploadFile, File, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Response, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional
@@ -54,7 +54,6 @@ SESSIONS_DIR.mkdir(exist_ok=True)
 
 @app.middleware("http")
 async def session_isolation_middleware(request: Request, call_next):
-    from fastapi import Request
     import shutil
     path = request.url.path
     if not path.startswith("/api") or path in ["/api/heartbeat", "/api/companies", "/api/debug-session"]:
