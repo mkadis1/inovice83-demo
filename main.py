@@ -21,8 +21,9 @@ from PIL import Image
 import pytesseract
 import pdfplumber
 
-# Pot do Tesseracta na Windows
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Pot do Tesseracta (nastavi samo na Windows)
+if os.name == 'nt':
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 from bs4 import BeautifulSoup
 import pdf_parser
 from pdf_parser import extract_data_from_pdf
