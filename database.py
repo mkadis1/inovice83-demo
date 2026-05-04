@@ -265,6 +265,10 @@ def init_db():
     except: pass
     try: cursor.execute("ALTER TABLE dokumenti ADD COLUMN odstotek_placila REAL DEFAULT 100")
     except: pass
+    
+    # Migracija: Enota mere
+    try: cursor.execute("ALTER TABLE dokumenti_postavke ADD COLUMN enota_mere TEXT DEFAULT 'kos'")
+    except: pass
 
     # Migracija: Email predloge
     try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN email_template_racun TEXT")

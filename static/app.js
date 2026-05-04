@@ -409,6 +409,9 @@ async function showModule(moduleName) {
         renderNastavitve();
     } else if (moduleName === 'help') {
         renderHelp();
+    } else if (moduleName === 'zgodovina') {
+        await renderHelp();
+        window.renderHelpDetail('zgodovina');
     } else {
         titleEl.textContent = "Neznano";
         contentDiv.innerHTML = `<p>Modul še ni implementiran.</p>`;
@@ -696,13 +699,12 @@ async function renderPartnerji() {
                 html += `
                     <tr>
                         <td><input type="checkbox" class="row-checkbox" data-id="${p.id}" ${isChecked} onclick="window.toggleItemSelection(${p.id}, 'partnerji')"></td>
-                        <td style="font-weight:500;">${p.naziv}</td>
+                        <td style="font-weight:500; cursor:pointer; color:var(--primary-blue); text-decoration:underline;" onclick="showUrediPartnerja(${p.id})">${p.naziv}</td>
                         <td style="font-size:0.9em; color:#666;">${polniNaslov}</td>
                         <td>${p.davcna_stevilka || '/'}</td>
                         <td>${zavezanecTag}</td>
                         <td><span style="background:var(--bg-sidebar); padding:3px 8px; border-radius:10px; font-size:0.8em; text-transform:uppercase;">${p.vrsta}</span></td>
                         <td class="action-buttons">
-                            <button class="icon-btn" onclick="showUrediPartnerja(${p.id})" title="Uredi">${ICONS.edit}</button>
                             <button class="icon-btn btn-red" onclick="brisiPartnerja(${p.id})" title="Briši">${ICONS.delete}</button>
                         </td>
                     </tr>
@@ -1004,7 +1006,7 @@ async function renderDokumenti(tip, naslov) {
                     <tr>
                         <td><input type="checkbox" class="row-checkbox" data-id="${d.id}" ${isChecked} onclick="window.toggleItemSelection(${d.id}, '${tip}')"></td>
                         <td>
-                            <span style="color:var(--primary-blue); font-weight:bold;">${d.stevilka}</span>
+                            <span style="color:var(--primary-blue); font-weight:bold; cursor:pointer; text-decoration:underline;" onclick="showUrediDokument(${d.id}, '${tip}', '${naslov}')">${d.stevilka}</span>
                             ${d.ima_prilogo ? '<span title="Dokument ima priponko" style="margin-left:5px; font-size:1.1em; cursor:help;">📎</span>' : ''}
                             ${d.zadnje_poslano ? '<span title="Dokument je bil poslan po e-pošti" style="margin-left:5px; font-size:1.1em; cursor:help;">✉</span>' : ''}
                         </td>
@@ -1025,7 +1027,6 @@ async function renderDokumenti(tip, naslov) {
                         <td class="action-buttons">
                             ${tip === 'ponudbe' ? `<button class="icon-btn" onclick="window.ustvariRacunIzPonudbe(${d.id})" title="Ustvari račun" style="color:#2b8a3e; border-color:#2b8a3e;">${ICONS.invoice}</button>` : ''}
                             <button class="icon-btn" onclick="window.kopirajDokument(${d.id}, '${tip}', '${naslov}')" title="Kopiraj">${ICONS.copy}</button>
-                            <button class="icon-btn" onclick="showUrediDokument(${d.id}, '${tip}', '${naslov}')" title="Uredi">${ICONS.edit}</button>
                             <button class="icon-btn btn-red" onclick="brisiDokument(${d.id}, '${tip}', '${naslov}')" title="Briši">${ICONS.delete}</button>
                         </td>
                     </tr>
@@ -1096,6 +1097,7 @@ async function showDodajDokument(tip, naslov, editData = null) {
 
     const nRes = await fetch('/api/nastavitve');
     const nastavitve = await nRes.json();
+    window._isZavezanec = !!nastavitve.zavezanec_za_ddv;
     const defaultNoga = (!nastavitve.zavezanec_za_ddv) ? "DDV ni obračunan na podlagi 1. odstavka 94. člena ZDDV-1" : "";
 
     const isActuallyEdit = !!editData && !!editData.id;
@@ -1121,16 +1123,19 @@ async function showDodajDokument(tip, naslov, editData = null) {
     }
 
     contentDiv.innerHTML = `
-        <div style="max-width: 800px; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-top: 4px solid var(--primary-blue); position: relative;">
-            <div style="position: absolute; top: 15px; right: 25px; display: flex; gap: 8px;">
-                ${isActuallyEdit ? `
-                    <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da;" onclick="showDodajDokument('${tip}', '${naslov}')" title="Nov dokument">➕ Nov</button>
-                    <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#e7f5ff; color:#1971c2; border:1px solid #a5d8ff;" onclick="window.kopirajDokument(${editData.id}, '${tip}', '${naslov}')" title="Kopiraj dokument">📋 Kopiraj</button>
-                    <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da; ${!prevId ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${prevId ? `onclick="showUrediDokument(${prevId}, '${tip}', '${naslov}')"` : 'disabled'} title="Prejšnji">◀ Prejšnji</button>
-                    <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da; ${!nextId ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${nextId ? `onclick="showUrediDokument(${nextId}, '${tip}', '${naslov}')"` : 'disabled'} title="Naslednji">Naslednji ▶</button>
-                ` : ''}
+        <div style="max-width: 800px; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-top: 4px solid var(--primary-blue);">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 15px; margin-bottom: 10px;">
+                <h3 style="margin: 0; color: var(--primary-blue); flex: 1;">${title}</h3>
+                <div style="display: flex; gap: 8px; flex-shrink: 0;">
+                    ${isActuallyEdit ? `
+                        ${tip === 'ponudbe' ? `<button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#2b8a3e; color:white; border:1px solid #2b8a3e;" onclick="window.ustvariRacunIzPonudbe(${editData.id})" title="Ustvari račun iz te ponudbe">🧾 Ustvari račun</button>` : ''}
+                        <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da;" onclick="showDodajDokument('${tip}', '${naslov}')" title="Nov dokument">➕ Nov</button>
+                        <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#e7f5ff; color:#1971c2; border:1px solid #a5d8ff;" onclick="window.kopirajDokument(${editData.id}, '${tip}', '${naslov}')" title="Kopiraj dokument">📋 Kopiraj</button>
+                        <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da; ${!prevId ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${prevId ? `onclick="showUrediDokument(${prevId}, '${tip}', '${naslov}')"` : 'disabled'} title="Prejšnji">◀ Prejšnji</button>
+                        <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da; ${!nextId ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${nextId ? `onclick="showUrediDokument(${nextId}, '${tip}', '${naslov}')"` : 'disabled'} title="Naslednji">Naslednji ▶</button>
+                    ` : ''}
+                </div>
             </div>
-            <h3 style="margin-bottom: 10px; color: var(--primary-blue); pr-120">${title}</h3>
             <p style="margin-bottom: 20px; color: var(--text-muted); font-size: 0.9em;">
                 ${isActuallyEdit ? 'Spremenite podatke in potrdite s klikom na spodnji gumb.' : `Dokument bo samodejno oštevilčen glede na izbrano poslovno leto (<strong>${getLeto()}</strong>).`}
             </p>
@@ -1196,21 +1201,8 @@ async function showDodajDokument(tip, naslov, editData = null) {
                 ` : ''}
                 
                 <h4 style="margin-top: 15px; padding-bottom: 10px; border-bottom: 1px solid var(--border-color); color: var(--text-muted);">Postavke dokumenta</h4>
-                <table id="postavke-table" style="margin-top: 10px; box-shadow: none; border: 1px solid var(--border-color);">
-                    <thead>
-                        <tr style="background:#f1f3f5">
-                            <th>Opis</th>
-                            <th width="80">Količina</th>
-                            <th width="100">Cena / en.</th>
-                            ${showPopust ? '<th width="80">Popust %</th>' : ''}
-                            <th width="100">Znesek</th>
-                            <th width="100">Konto</th>
-                            <th width="50"></th>
-                        </tr>
-                    </thead>
-                    <tbody id="postavke-body">
-                    </tbody>
-                </table>
+                <div id="postavke-container" style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
+                </div>
                 <div style="margin-top: 10px; display:flex; justify-content:space-between; align-items:center;">
                     <button type="button" class="btn" style="background:var(--bg-sidebar); color:var(--text-main); font-size: 0.8em;" onclick="dodajPostavkoR()">+ Dodaj vrstico</button>
                     <div style="font-size: 1.25em; font-weight: bold; color:var(--primary-blue);">SKUPAJ: <span id="skupaj-znesek">0.00</span> &euro;</div>
@@ -1429,35 +1421,104 @@ async function showDodajDokument(tip, naslov, editData = null) {
 }
 
 window.dodajPostavkoR = function(data = null) {
-    const tbody = document.getElementById('postavke-body');
-    const tr = document.createElement('tr');
+    const container = document.getElementById('postavke-container');
     const showPopust = (window._currentTip === 'izdani_racuni' || window._currentTip === 'ponudbe');
-    tr.innerHTML = `
-        <td><input type="text" class="p-opis" style="width:100%" value="${data ? data.opis : ''}" required></td>
-        <td><input type="text" class="p-kol" value="${data ? formatNumberJS(data.kolicina) : '1,00'}" style="width:100%" oninput="kalkulirajZneske()" required></td>
-        <td><input type="text" class="p-cena" value="${data ? formatNumberJS(data.cena_enote, 4) : '0,00'}" style="width:100%" oninput="kalkulirajZneske()" required></td>
-        ${showPopust ? `<td><input type="number" step="0.01" class="p-popust" value="${data ? data.popust : 0}" style="width:100%" oninput="kalkulirajZneske()"></td>` : ''}
-        <td><input type="text" class="p-znesek" value="${data ? formatNumberJS(data.znesek_skupaj) : '0,00'}" style="width:100%; font-weight:bold" readonly></td>
-        <td><input type="text" class="p-konto" list="konti-datalist" style="width:100%" placeholder="npr. 760" value="${data ? (data.konto || '') : ''}"></td>
-        <td><button type="button" class="btn btn-red" style="padding: 2px 5px;" onclick="this.parentElement.parentElement.remove(); kalkulirajZneske()">X</button></td>
+    
+    const div = document.createElement('div');
+    div.className = 'postavka-item';
+    div.style = "border: 1px solid var(--border-color); padding: 15px; border-radius: 6px; background: #f8f9fa;";
+    
+    div.innerHTML = `
+        <div style="display:flex; gap:10px; margin-bottom:10px;">
+            <div style="flex:1;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Opis storitve/izdelka</label>
+                <input type="text" class="p-opis" style="width:100%" value="${data ? data.opis : ''}" required>
+            </div>
+            <div style="width: 40px; display:flex; align-items:flex-end;">
+                <button type="button" class="btn btn-red" style="padding: 5px 10px; width:100%; height: 32px;" onclick="this.closest('.postavka-item').remove(); kalkulirajZneske()">X</button>
+            </div>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+            <div style="flex: 1; min-width: 80px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Količina</label>
+                <input type="text" class="p-kol" value="${data ? formatNumberJS(data.kolicina) : '1,00'}" style="width:100%; height:32px;" oninput="kalkulirajZneske()" required>
+            </div>
+            <div style="flex: 1; min-width: 80px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">EM</label>
+                <select class="p-em" style="width:100%; height:32px;">
+                    <option value="kos" ${(!data || data.enota_mere === 'kos') ? 'selected' : ''}>kos</option>
+                    <option value="h" ${data && data.enota_mere === 'h' ? 'selected' : ''}>h</option>
+                    <option value="kg" ${data && data.enota_mere === 'kg' ? 'selected' : ''}>kg</option>
+                    <option value="g" ${data && data.enota_mere === 'g' ? 'selected' : ''}>g</option>
+                    <option value="t" ${data && data.enota_mere === 't' ? 'selected' : ''}>t</option>
+                    <option value="l" ${data && data.enota_mere === 'l' ? 'selected' : ''}>l</option>
+                    <option value="m" ${data && data.enota_mere === 'm' ? 'selected' : ''}>m</option>
+                    <option value="m2" ${data && data.enota_mere === 'm2' ? 'selected' : ''}>m2</option>
+                    <option value="m3" ${data && data.enota_mere === 'm3' ? 'selected' : ''}>m3</option>
+                    <option value="km" ${data && data.enota_mere === 'km' ? 'selected' : ''}>km</option>
+                    <option value="kpl" ${data && data.enota_mere === 'kpl' ? 'selected' : ''}>kpl</option>
+                    <option value="dan" ${data && data.enota_mere === 'dan' ? 'selected' : ''}>dan</option>
+                    <option value="mesec" ${data && data.enota_mere === 'mesec' ? 'selected' : ''}>mesec</option>
+                    <option value="paušal" ${data && data.enota_mere === 'paušal' ? 'selected' : ''}>paušal</option>
+                </select>
+            </div>
+            <div style="flex: 1.5; min-width: 100px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Cena / en.</label>
+                <input type="text" class="p-cena" value="${data ? formatNumberJS(data.cena_enote, 4) : '0,00'}" style="width:100%; height:32px;" oninput="kalkulirajZneske()" required>
+            </div>
+            ${showPopust ? `
+            <div style="flex: 1; min-width: 80px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Pop. %</label>
+                <input type="number" step="0.01" class="p-popust" value="${data ? data.popust : 0}" style="width:100%; height:32px;" oninput="kalkulirajZneske()">
+            </div>
+            ` : ''}
+            ${window._isZavezanec ? `
+            <div style="flex: 1; min-width: 80px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">DDV %</label>
+                <select class="p-ddv" style="width:100%; height:32px;" onchange="kalkulirajZneske()">
+                    <option value="22" ${(!data || data.stopnja_ddv === 22) ? 'selected' : ''}>22 %</option>
+                    <option value="9.5" ${(data && data.stopnja_ddv === 9.5) ? 'selected' : ''}>9.5 %</option>
+                    <option value="5" ${(data && data.stopnja_ddv === 5) ? 'selected' : ''}>5 %</option>
+                    <option value="0" ${(data && data.stopnja_ddv === 0) ? 'selected' : ''}>0 %</option>
+                </select>
+            </div>
+            ` : ''}
+            <div style="flex: 1.5; min-width: 100px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Skupaj</label>
+                <input type="text" class="p-znesek" value="${data ? formatNumberJS(data.znesek_skupaj) : '0,00'}" style="width:100%; height:32px; font-weight:bold; background:#e9ecef;" readonly>
+            </div>
+            <div style="flex: 1; min-width: 80px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Konto</label>
+                <input type="text" class="p-konto" list="konti-datalist" style="width:100%; height:32px;" placeholder="npr. 760" value="${data ? (data.konto || '') : ''}">
+            </div>
+        </div>
     `;
-    tbody.appendChild(tr);
+    container.appendChild(div);
 };
 
 window.kalkulirajZneske = function() {
     let skupajValuta = 0;
+    let sumBrezDDVValuta = 0;
     const tecaj = parseNumberJS(document.getElementById('d_tecaj')?.value || '1');
     const valuta = document.getElementById('d_valuta')?.value || 'EUR';
 
-    document.querySelectorAll('#postavke-body tr').forEach(tr => {
+    document.querySelectorAll('#postavke-container .postavka-item').forEach(tr => {
         const kol = parseNumberJS(tr.querySelector('.p-kol').value);
         const cena = parseNumberJS(tr.querySelector('.p-cena').value);
         const popEl = tr.querySelector('.p-popust');
         const popust = popEl ? (parseNumberJS(popEl.value)) : 0;
         
+        const ddvEl = tr.querySelector('.p-ddv');
+        const ddv = ddvEl ? (parseNumberJS(ddvEl.value)) : 0;
+        
         const znesekT = (kol * cena) * (1 - popust / 100);
         tr.querySelector('.p-znesek').value = formatNumberJS(znesekT);
         skupajValuta += znesekT;
+        if (window._isZavezanec) {
+            sumBrezDDVValuta += znesekT / (1 + ddv / 100);
+        } else {
+            sumBrezDDVValuta += znesekT;
+        }
     });
 
     const skupajEUR = skupajValuta * tecaj;
@@ -1465,6 +1526,15 @@ window.kalkulirajZneske = function() {
     if (valuta !== 'EUR') {
         text = `${formatNumberJS(skupajValuta)} ${valuta} (${formatNumberJS(skupajEUR)} EUR)`;
     }
+    
+    if (window._isZavezanec) {
+        const brezDDVEUR = sumBrezDDVValuta * tecaj;
+        const ddvEUR = skupajEUR - brezDDVEUR;
+        text = `Brez DDV: ${formatNumberJS(brezDDVEUR)} | DDV: ${formatNumberJS(ddvEUR)} | Skupaj: ` + text;
+    } else {
+        text = `Skupaj: ` + text;
+    }
+    
     document.getElementById('skupaj-znesek').innerText = text;
 };
 
@@ -1473,14 +1543,16 @@ async function shraniDokument(e, tip, naslov, id = null) {
     window.kalkulirajZneske();
     
     const postavke = [];
-    document.querySelectorAll('#postavke-body tr').forEach(tr => {
+    document.querySelectorAll('#postavke-container .postavka-item').forEach(tr => {
         const popEl = tr.querySelector('.p-popust');
+        const ddvEl = tr.querySelector('.p-ddv');
         postavke.push({
             opis: tr.querySelector('.p-opis').value,
             kolicina: parseNumberJS(tr.querySelector('.p-kol').value) || 1,
+            enota_mere: tr.querySelector('.p-em').value,
             cena_enote: parseNumberJS(tr.querySelector('.p-cena').value) || 0,
             popust: popEl ? (parseNumberJS(popEl.value)) : 0,
-            stopnja_ddv: 22, // privzeto
+            stopnja_ddv: ddvEl ? parseNumberJS(ddvEl.value) : 0,
             znesek_skupaj: parseNumberJS(tr.querySelector('.p-znesek').value) || 0,
             konto: tr.querySelector('.p-konto').value
         });
@@ -1489,8 +1561,14 @@ async function shraniDokument(e, tip, naslov, id = null) {
     const tecaj = parseNumberJS(document.getElementById('d_tecaj')?.value || '1');
     const valuta = document.getElementById('d_valuta')?.value || 'EUR';
     let sumValuta = 0;
-    postavke.forEach(p => sumValuta += p.znesek_skupaj);
+    let sumBrezDDV = 0;
+    postavke.forEach(p => {
+        sumValuta += p.znesek_skupaj;
+        sumBrezDDV += p.znesek_skupaj / (1 + p.stopnja_ddv / 100);
+    });
     const sumEUR = sumValuta * tecaj;
+    const sumBrezDDVEUR = sumBrezDDV * tecaj;
+    const sumDDVEUR = sumEUR - sumBrezDDVEUR;
 
     const zakljucna_besedila = [];
     document.querySelectorAll('#d_zakljucno_container textarea').forEach(tx => {
@@ -1504,8 +1582,8 @@ async function shraniDokument(e, tip, naslov, id = null) {
         partner_id: parseInt(document.getElementById('d_partner').value),
         datum_izdaje: parseDateISO(document.getElementById('d_datum_izdaje').value),
         datum_zapadlosti: parseDateISO(document.getElementById('d_datum_zapadlosti').value),
-        znesek_brez_ddv: 0,
-        znesek_ddv: 0,
+        znesek_brez_ddv: sumBrezDDVEUR,
+        znesek_ddv: sumDDVEUR,
         znesek_skupaj: sumEUR,
         znesek_v_valuti: sumValuta,
         valuta: valuta,
@@ -1631,17 +1709,55 @@ window.kalkulirajImportZneske = function() {
 };
 
 window.dodajImportPostavko = function() {
-    const tbody = document.getElementById('import-postavke-body');
-    const tr = document.createElement('tr');
-    tr.className = 'import-p-row';
-    tr.innerHTML = `
-        <td><input type="text" class="i-p-opis" value="" style="width:100%" required></td>
-        <td><input type="text" class="i-p-kol" value="1,00" style="width:100%; text-align:right" oninput="window.kalkulirajImportZneske()" required></td>
-        <td><input type="text" class="i-p-cena" value="0,00" style="width:100%; text-align:right" oninput="window.kalkulirajImportZneske()" required></td>
-        <td><input type="text" class="i-p-znesek" value="0,00" style="width:100%; text-align:right; font-weight:bold" readonly></td>
-        <td><button type="button" class="btn btn-red" style="padding:2px 5px;" onclick="this.closest('tr').remove(); window.kalkulirajImportZneske()">X</button></td>
+    const container = document.getElementById('import-postavke-body');
+    const div = document.createElement('div');
+    div.className = 'import-p-row';
+    div.style = "border: 1px solid var(--border-color); padding: 15px; border-radius: 6px; background: #f8f9fa;";
+    div.innerHTML = `
+        <div style="display:flex; gap:10px; margin-bottom:10px;">
+            <div style="flex:1;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Opis</label>
+                <input type="text" class="i-p-opis" value="" style="width:100%" required>
+            </div>
+            <div style="width: 40px; display:flex; align-items:flex-end;">
+                <button type="button" class="btn btn-red" style="padding: 5px 10px; width:100%; height: 32px;" onclick="this.closest('.import-p-row').remove(); window.kalkulirajImportZneske()">X</button>
+            </div>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+            <div style="flex: 1; min-width: 80px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Količina</label>
+                <input type="text" class="i-p-kol" value="1,00" style="width:100%; height:32px; text-align:right" oninput="window.kalkulirajImportZneske()" required>
+            </div>
+            <div style="flex: 1; min-width: 80px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">EM</label>
+                <select class="i-p-em" style="width:100%; height:32px;">
+                    <option value="kos">kos</option>
+                    <option value="h">h</option>
+                    <option value="kg">kg</option>
+                    <option value="g">g</option>
+                    <option value="t">t</option>
+                    <option value="l">l</option>
+                    <option value="m">m</option>
+                    <option value="m2">m2</option>
+                    <option value="m3">m3</option>
+                    <option value="km">km</option>
+                    <option value="kpl">kpl</option>
+                    <option value="dan">dan</option>
+                    <option value="mesec">mesec</option>
+                    <option value="paušal">paušal</option>
+                </select>
+            </div>
+            <div style="flex: 1.5; min-width: 100px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Cena</label>
+                <input type="text" class="i-p-cena" value="0,00" style="width:100%; height:32px; text-align:right" oninput="window.kalkulirajImportZneske()" required>
+            </div>
+            <div style="flex: 1.5; min-width: 100px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Skupaj</label>
+                <input type="text" class="i-p-znesek" value="0,00" style="width:100%; height:32px; text-align:right; font-weight:bold; background:#e9ecef;" readonly>
+            </div>
+        </div>
     `;
-    tbody.appendChild(tr);
+    container.appendChild(div);
 };
 
 
@@ -1731,28 +1847,54 @@ async function showImportPreview(data) {
             </div>
 
             <h4>Postavke</h4>
-            <table class="import-preview-table" style="margin-top:10px; width:100%">
-                <thead>
-                    <tr>
-                        <th>Opis</th>
-                        <th style="text-align:right; width:80px;">Količina</th>
-                        <th style="text-align:right; width:120px;">Cena</th>
-                        <th style="text-align:right; width:120px;">Skupaj</th>
-                        <th style="width:40px;"></th>
-                    </tr>
-                </thead>
-                <tbody id="import-postavke-body">
+            <div id="import-postavke-body" style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
                     ${data.postavke.map(p => `
-                        <tr class="import-p-row">
-                            <td><input type="text" class="i-p-opis" value="${p.opis}" style="width:100%" required></td>
-                            <td><input type="text" class="i-p-kol" value="${formatNumberJS(p.kolicina)}" style="width:100%; text-align:right" oninput="window.kalkulirajImportZneske()" required></td>
-                            <td><input type="text" class="i-p-cena" value="${formatNumberJS(p.cena_enote)}" style="width:100%; text-align:right" oninput="window.kalkulirajImportZneske()" required></td>
-                            <td><input type="text" class="i-p-znesek" value="${formatNumberJS(p.znesek_skupaj)}" style="width:100%; text-align:right; font-weight:bold" readonly></td>
-                            <td><button type="button" class="btn btn-red" style="padding:2px 5px;" onclick="this.closest('tr').remove(); window.kalkulirajImportZneske()">X</button></td>
-                        </tr>
+                        <div class="import-p-row" style="border: 1px solid var(--border-color); padding: 15px; border-radius: 6px; background: #f8f9fa;">
+                            <div style="display:flex; gap:10px; margin-bottom:10px;">
+                                <div style="flex:1;">
+                                    <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Opis</label>
+                                    <input type="text" class="i-p-opis" value="${p.opis}" style="width:100%" required>
+                                </div>
+                                <div style="width: 40px; display:flex; align-items:flex-end;">
+                                    <button type="button" class="btn btn-red" style="padding: 5px 10px; width:100%; height: 32px;" onclick="this.closest('.import-p-row').remove(); window.kalkulirajImportZneske()">X</button>
+                                </div>
+                            </div>
+                            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+                                <div style="flex: 1; min-width: 80px;">
+                                    <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Količina</label>
+                                    <input type="text" class="i-p-kol" value="${formatNumberJS(p.kolicina)}" style="width:100%; height:32px; text-align:right" oninput="window.kalkulirajImportZneske()" required>
+                                </div>
+                                <div style="flex: 1; min-width: 80px;">
+                                    <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">EM</label>
+                                    <select class="i-p-em" style="width:100%; height:32px;">
+                                        <option value="kos" ${(!p.enota_mere || p.enota_mere === 'kos') ? 'selected' : ''}>kos</option>
+                                        <option value="h" ${p.enota_mere === 'h' ? 'selected' : ''}>h</option>
+                                        <option value="kg" ${p.enota_mere === 'kg' ? 'selected' : ''}>kg</option>
+                                        <option value="g" ${p.enota_mere === 'g' ? 'selected' : ''}>g</option>
+                                        <option value="t" ${p.enota_mere === 't' ? 'selected' : ''}>t</option>
+                                        <option value="l" ${p.enota_mere === 'l' ? 'selected' : ''}>l</option>
+                                        <option value="m" ${p.enota_mere === 'm' ? 'selected' : ''}>m</option>
+                                        <option value="m2" ${p.enota_mere === 'm2' ? 'selected' : ''}>m2</option>
+                                        <option value="m3" ${p.enota_mere === 'm3' ? 'selected' : ''}>m3</option>
+                                        <option value="km" ${p.enota_mere === 'km' ? 'selected' : ''}>km</option>
+                                        <option value="kpl" ${p.enota_mere === 'kpl' ? 'selected' : ''}>kpl</option>
+                                        <option value="dan" ${p.enota_mere === 'dan' ? 'selected' : ''}>dan</option>
+                                        <option value="mesec" ${p.enota_mere === 'mesec' ? 'selected' : ''}>mesec</option>
+                                        <option value="paušal" ${p.enota_mere === 'paušal' ? 'selected' : ''}>paušal</option>
+                                    </select>
+                                </div>
+                                <div style="flex: 1.5; min-width: 100px;">
+                                    <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Cena</label>
+                                    <input type="text" class="i-p-cena" value="${formatNumberJS(p.cena_enote)}" style="width:100%; height:32px; text-align:right" oninput="window.kalkulirajImportZneske()" required>
+                                </div>
+                                <div style="flex: 1.5; min-width: 100px;">
+                                    <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:3px;">Skupaj</label>
+                                    <input type="text" class="i-p-znesek" value="${formatNumberJS(p.znesek_skupaj)}" style="width:100%; height:32px; text-align:right; font-weight:bold; background:#e9ecef;" readonly>
+                                </div>
+                            </div>
+                        </div>
                     `).join('')}
-                </tbody>
-            </table>
+            </div>
             <button class="btn btn-blue" style="margin-top:5px; font-size:0.8rem; padding:4px 8px;" onclick="window.dodajImportPostavko()">+ Dodaj vrstico</button>
 
             <div class="modal-footer">
@@ -1820,11 +1962,13 @@ async function showImportPreview(data) {
             document.querySelectorAll('.import-p-row').forEach(tr => {
                 const opis = tr.querySelector('.i-p-opis').value;
                 const kol = parseNumberJS(tr.querySelector('.i-p-kol').value) || 1;
+                const em = tr.querySelector('.i-p-em').value || 'kos';
                 const cena = parseNumberJS(tr.querySelector('.i-p-cena').value) || 0;
                 const znesek = kol * cena;
                 novePostavke.push({
                     opis: opis,
                     kolicina: kol,
+                    enota_mere: em,
                     cena_enote: cena,
                     stopnja_ddv: 22,
                     znesek_skupaj: znesek,
@@ -1965,7 +2109,7 @@ async function renderIzpiski() {
                         <td><input type="checkbox" class="row-checkbox" data-id="${d.id}" ${isChecked} onclick="window.toggleItemSelection(${d.id}, 'izpiski')"></td>
                         <td>${formatDateJS(d.datum)}</td>
                         <td>
-                            <span style="font-weight:500;">${d.stevilka_izpiska}</span>
+                            <span style="font-weight:500; cursor:pointer; color:var(--primary-blue); text-decoration:underline;" onclick="showUrediIzpisek(${d.id})">${d.stevilka_izpiska}</span>
                             ${d.ima_prilogo ? '<span title="Izpisek ima priponko" style="margin-left:5px; font-size:1.1em; cursor:help;">📎</span>' : ''}
                         </td>
                         <td>${formatNumberJS(d.zacetno_stanje)} &euro;</td>
@@ -1974,7 +2118,6 @@ async function renderIzpiski() {
                         <td>${formatNumberJS(d.koncno_stanje)} &euro;</td>
                         <td style="font-weight:bold; color:${col}">${statusK}</td>
                         <td class="action-buttons">
-                            <button class="icon-btn" onclick="showUrediIzpisek(${d.id})" title="Uredi">${ICONS.edit}</button>
                             <button class="icon-btn btn-red" onclick="brisiIzpisek(${d.id})" title="Briši">${ICONS.delete}</button>
                         </td>
                     </tr>
@@ -2157,15 +2300,17 @@ async function showDodajIzpisek(editData = null, noDefaultRow = false) {
     }
 
     contentDiv.innerHTML = `
-        <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-top: 4px solid var(--primary-blue); position: relative;">
-            <div style="position: absolute; top: 15px; right: 25px; display: flex; gap: 8px;">
-                ${isEdit ? `
-                    <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da;" onclick="showDodajIzpisek()" title="Nov izpisek">➕ Nov</button>
-                    <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da; ${!prevId ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${prevId ? `onclick="showUrediIzpisek(${prevId})"` : 'disabled'} title="Prejšnji">◀ Prejšnji</button>
-                    <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da; ${!nextId ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${nextId ? `onclick="showUrediIzpisek(${nextId})"` : 'disabled'} title="Naslednji">Naslednji ▶</button>
-                ` : ''}
+        <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-top: 4px solid var(--primary-blue);">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 15px; margin-bottom: 20px;">
+                <h3 style="margin: 0; color: var(--primary-blue); flex: 1;">${title}</h3>
+                <div style="display: flex; gap: 8px; flex-shrink: 0;">
+                    ${isEdit ? `
+                        <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da;" onclick="showDodajIzpisek()" title="Nov izpisek">➕ Nov</button>
+                        <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da; ${!prevId ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${prevId ? `onclick="showUrediIzpisek(${prevId})"` : 'disabled'} title="Prejšnji">◀ Prejšnji</button>
+                        <button type="button" class="btn" style="padding: 4px 10px; font-size: 0.9em; background:#f1f3f5; color:#495057; border:1px solid #ced4da; ${!nextId ? 'opacity:0.5;cursor:not-allowed;' : ''}" ${nextId ? `onclick="showUrediIzpisek(${nextId})"` : 'disabled'} title="Naslednji">Naslednji ▶</button>
+                    ` : ''}
+                </div>
             </div>
-            <h3 style="margin-bottom: 20px; color: var(--primary-blue);">${title}</h3>
             <form id="izpisekForm" onsubmit="shraniIzpisek(event, ${isEdit ? editData.id : 'null'})">
                 <input type="hidden" id="izpisek_id_skrito" value="${isEdit ? editData.id : ''}">
                 <div style="display:flex; gap: 15px;">
@@ -3104,7 +3249,7 @@ async function renderOsnovnaSredstva() {
 
                 html += `<tr>
                     <td style="padding:10px;"><input type="checkbox" class="row-checkbox" data-id="${x.id}" ${isChecked} onclick="window.toggleItemSelection(${x.id}, 'osnovna_sredstva')"></td>
-                    <td style="padding:10px; font-weight:bold; color:#495057;">${x.inventarna_stevilka || ''}</td>
+                    <td style="padding:10px; font-weight:bold; color:var(--primary-blue); cursor:pointer; text-decoration:underline;" onclick='showDodajOsnovnoSredstvo(${JSON.stringify(x).replace(/'/g, "&apos;")})'>${x.inventarna_stevilka || ''}</td>
                     <td style="padding:10px;">${x.naziv}</td>
                     <td style="padding:10px; white-space:nowrap;">${formatDateJS(x.datum_nabave)}</td>
                     <td style="padding:10px;">${aktivenTag}</td>
@@ -3113,7 +3258,6 @@ async function renderOsnovnaSredstva() {
                     <td style="padding:10px; text-align:right; color:#e03131;">${formatMoneyJS(odpisana)}</td>
                     <td style="padding:10px; text-align:right; font-weight:bold; color:var(--primary-blue);">${formatMoneyJS(sedanja)}</td>
                     <td class="action-buttons">
-                        <button class="icon-btn" onclick='showDodajOsnovnoSredstvo(${JSON.stringify(x).replace(/'/g, "&apos;")})' title="Uredi">${ICONS.edit}</button>
                         <button class="icon-btn btn-red" onclick="window.brisiOsnovnoSredstvo(${x.id})" title="Briši">${ICONS.delete}</button>
                     </td>
                 </tr>`;
@@ -3273,12 +3417,11 @@ window.renderZaposleni = async function() {
                 const isChecked = window.appSelection.ids.includes(z.id) ? 'checked' : '';
                 html += `<tr>
                     <td style="padding:10px;"><input type="checkbox" class="row-checkbox" data-id="${z.id}" ${isChecked} onclick="window.toggleItemSelection(${z.id}, 'zaposleni')"></td>
-                    <td style="padding:10px; font-weight:600;">${z.ime_priimek}</td>
+                    <td style="padding:10px; font-weight:600; cursor:pointer; color:var(--primary-blue); text-decoration:underline;" onclick='window.showDodajZaposleni(${JSON.stringify(z).replace(/'/g,"&apos;")})'>${z.ime_priimek}</td>
                     <td style="padding:10px; font-size:0.9em;">${z.davcna_stevilka||''}<br><span style="color:#666">${z.delovno_mesto||''}</span></td>
                     <td style="padding:10px; font-size:0.9em;">${z.iban||''}</td>
                     <td style="padding:10px; text-align:center; font-weight:bold; color:var(--primary-blue);">${z.dopust_odmerjen || 20} dni</td>
                     <td class="action-buttons">
-                        <button class="icon-btn" onclick='window.showDodajZaposleni(${JSON.stringify(z).replace(/'/g,"&apos;")})' title="Uredi">${ICONS.edit}</button>
                         <button class="icon-btn btn-red" onclick="window.brisiZaposleni(${z.id})" title="Briši">${ICONS.delete}</button>
                     </td></tr>`;
             });
@@ -3473,14 +3616,13 @@ async function renderPotniNalogi() {
                 const isChecked = window.appSelection.ids.includes(p.id) ? 'checked' : '';
                 html += `<tr>
                     <td style="padding:10px;"><input type="checkbox" class="row-checkbox" data-id="${p.id}" ${isChecked} onclick="window.toggleItemSelection(${p.id}, 'potni_nalogi')"></td>
-                    <td style="font-weight:bold; color:var(--primary-blue); padding:10px;">${p.stevilka_naloga}</td>
+                    <td style="font-weight:bold; color:var(--primary-blue); padding:10px; cursor:pointer; text-decoration:underline;" onclick='window.showDodajPN(${JSON.stringify(p).replace(/'/g,"&apos;")})'>${p.stevilka_naloga}</td>
                     <td style="padding:10px; white-space:nowrap;">${formatDateJS(p.datum_izdaje)}</td>
                     <td style="padding:10px;">${p.zaposleni_ime || '/'}</td>
                     <td style="padding:10px;">${p.namen||'/'}</td>
                     <td style="font-size:0.85em; padding:10px;">Od: ${p.relacija_zacetek||''}<br>Do: ${p.relacija_cilj||''}</td>
                     <td style="font-weight:bold; text-align:right; color:#2b8a3e; padding:10px;">${formatMoneyJS(p.skupni_znesek)}</td>
                     <td class="action-buttons">
-                        <button class="icon-btn" onclick='window.showDodajPN(${JSON.stringify(p).replace(/'/g,"&apos;")})' title="Uredi">${ICONS.edit}</button>
                         <button class="icon-btn btn-red" onclick="window.brisiPotniNalog(${p.id})" title="Briši">${ICONS.delete}</button>
                     </td>
                 </tr>`;
@@ -3823,9 +3965,8 @@ async function renderPrispevki() {
             const isChecked = window.appSelection.ids.includes(x.id) ? 'checked' : '';
             html += `<tr>
                 <td><input type="checkbox" class="row-checkbox" data-id="${x.id}" ${isChecked} onclick="window.toggleItemSelection(${x.id}, 'place')"></td>
-                <td>${x.mesec}/${x.leto}</td><td>${formatMoneyJS(x.znesek_skupaj)}</td>
+                <td style="cursor:pointer; color:var(--primary-blue); text-decoration:underline;" onclick="window.editGeneric('prispevki', ${x.id}, ${JSON.stringify(x).replace(/"/g, '&quot;')})">${x.mesec}/${x.leto}</td><td>${formatMoneyJS(x.znesek_skupaj)}</td>
                 <td style="text-align:right">
-                    <button class="icon-btn" onclick="window.editGeneric('prispevki', ${x.id}, ${JSON.stringify(x).replace(/"/g, '&quot;')})">${ICONS.edit}</button>
                     <button class="icon-btn btn-red" onclick="window.brisiGeneric('prispevki', ${x.id}, renderPrispevki)">${ICONS.delete}</button>
                 </td></tr>`;
         });
@@ -5099,6 +5240,115 @@ async function renderHelp() {
                 </ul>
                 <p>Sistem pripravi tudi UPN-QR kode za plačilo vseh prispevkov in neto plače.</p>
             `
+        },
+        {
+            id: 'zgodovina',
+            title: 'Zgodovina sprememb',
+            icon: '🕒',
+            content: 'Pregled vseh posodobitev in novosti v programu od začetka do danes.',
+            details: `
+                <h4>Zgodovina sprememb</h4>
+                <div style="background:#fff; border:1px solid #eee; border-radius:10px; padding:20px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);">
+                    
+                    <div style="margin-bottom:25px;">
+                        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                            <span style="background:var(--primary-blue); color:white; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">04. 05. 2026</span>
+                            <span style="color:#666; font-size:0.9rem;">Zadnja posodobitev</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>DDV upravljanje:</strong> Dokumenti se samodejno prilagodijo glede na status davčnega zavezanca — ne-zavezanci ne vidijo DDV stolpcev na računih in ponudbah.</li>
+                            <li><strong>DDV izbira po postavkah:</strong> Davčni zavezanci lahko za vsako postavko izberejo stopnjo DDV (22 %, 9,5 %, 5 %, 0 %) z avtomatskim izračunom.</li>
+                            <li><strong>Enota mere (EM):</strong> Dodan stolpec za mersko enoto pri vseh postavkah dokumentov (standard e-SLOG).</li>
+                            <li><strong>Preglednejše postavke:</strong> Opis v svoji vrstici, vse numerične vrednosti spodaj z oznakami — za zavezance in nezavezance.</li>
+                            <li><strong>Zakonska klavzula:</strong> Ne-zavezanci imajo na vsakem dokumentu samodejno besedilo po 94. členu ZDDV-1.</li>
+                        </ul>
+                    </div>
+
+                    <div style="margin-bottom:25px; padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">30. 04. 2026</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Optimizacija navigacije:</strong> Omogočeno neposredno urejanje partnerjev, zaposlenih in prispevkov neposredno v seznamih.</li>
+                            <li><strong>Poenostavljen UI:</strong> Odstranjeni odvečni gumbi "Uredi" za bolj čist izgled.</li>
+                            <li><strong>Ponudbe:</strong> Dodan gumb "Ustvari račun" neposredno iz pregleda ponudbe.</li>
+                            <li><strong>Stabilnost:</strong> Izboljšana izolacija demo okolja in popravki časovnih pasov.</li>
+                            <li><strong>Kopiranje:</strong> Nova funkcija za hitro podvajanje obstoječih dokumentov.</li>
+                            <li><strong>E-pošta:</strong> Vzpostavljen dnevnik poslanih sporočil za boljši nadzor nad distribucijo.</li>
+                        </ul>
+                    </div>
+
+                    <div style="margin-bottom:25px; padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">28. 04. 2026</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Nastavitve PDF:</strong> Možnost vklopa/izklopa QR kode in bančnih podatkov na dokumentih.</li>
+                            <li><strong>Plačila:</strong> Podpora za vnos delnih plačil na računih.</li>
+                        </ul>
+                    </div>
+
+                    <div style="margin-bottom:25px; padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">24. 04. 2026</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Napreden uvoz:</strong> Interaktivno urejanje postavk PDF računov pred končnim uvozom.</li>
+                            <li><strong>Partnerji:</strong> Avtomatsko prepoznavanje in dodajanje novih dobaviteljev iz PDF dokumentov.</li>
+                        </ul>
+                    </div>
+
+                    <div style="margin-bottom:25px; padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">22. 04. 2026</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Tuji računi:</strong> Podpora za GBP in USD s samodejnim preračunom po tečaju BS.</li>
+                            <li><strong>Pomoč:</strong> Vzpostavitev prve verzije modula "Navodila in pomoč".</li>
+                        </ul>
+                    </div>
+
+                    <div style="margin-bottom:25px; padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">21. 04. 2026</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Zaposleni:</strong> Avtomatiziran izračun letnega dopusta.</li>
+                            <li><strong>Potni nalogi:</strong> Integracija z zemljevidi za izračun razdalj in dnevnic.</li>
+                        </ul>
+                    </div>
+
+                    <div style="margin-bottom:25px; padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">20. 04. 2026</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Demo:</strong> Vzpostavitev javne preizkusne verzije programa.</li>
+                            <li><strong>Filtri:</strong> Dodano napredno sortiranje in iskanje po vseh modulih.</li>
+                        </ul>
+                    </div>
+
+                    <div style="margin-bottom:25px; padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">18. 04. 2026</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Poročila:</strong> Implementacija Bruto bilance.</li>
+                            <li><strong>FIFO likvidacija:</strong> Pametno zapiranje računov na podlagi bančnih izpiskov.</li>
+                        </ul>
+                    </div>
+
+                    <div style="padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">17. 04. 2026</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Začetek:</strong> Prva stabilna verzija z moduli za račune, partnerje in bančne izpiske.</li>
+                        </ul>
+                    </div>
+
+                </div>
+            `
         }
     ];
 
@@ -5142,7 +5392,7 @@ async function renderHelp() {
             </div>
 
             <div id="help-content-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px;">
-                ${helpTopics.map(topic => `
+                ${helpTopics.filter(t => t.id !== 'zgodovina').map(topic => `
                     <div class="help-card" data-id="${topic.id}" data-title="${topic.title.toLowerCase()}" data-content="${topic.content.toLowerCase()}"
                          onclick="window.renderHelpDetail('${topic.id}')"
                          style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 10px; padding: 20px; transition: all 0.2s; cursor: pointer; position:relative; overflow:hidden;">

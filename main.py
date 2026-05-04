@@ -28,7 +28,6 @@ from bs4 import BeautifulSoup
 import pdf_parser
 from pdf_parser import extract_data_from_pdf
 import io
-# from xhtml2pdf import pisa
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -726,12 +725,22 @@ def generate_pdf_invoice(invoice_data, company_data, partner_data, items):
     pdf.set_font('DejaVu', 'B', 9)
     # Header cells
     # Header cells - Adjusted widths to fit Discount
-    pdf.cell(85, 8, 'Opis storitve/izdelka', 1, 0, 'L', True)
-    pdf.cell(15, 8, 'Kol.', 1, 0, 'C', True)
-    pdf.cell(25, 8, 'Cena/en.', 1, 0, 'R', True)
-    pdf.cell(15, 8, 'Pop.%', 1, 0, 'C', True)
-    pdf.cell(20, 8, 'DDV%', 1, 0, 'C', True)
-    pdf.cell(30, 8, 'Znesek', 1, 1, 'R', True)
+    is_zavezanec = bool(company_data.get('zavezanec_za_ddv', False))
+    if is_zavezanec:
+        pdf.cell(75, 8, 'Opis storitve/izdelka', 1, 0, 'L', True)
+        pdf.cell(12, 8, 'Kol.', 1, 0, 'C', True)
+        pdf.cell(13, 8, 'EM', 1, 0, 'C', True)
+        pdf.cell(25, 8, 'Cena/en.', 1, 0, 'R', True)
+        pdf.cell(15, 8, 'Pop.%', 1, 0, 'C', True)
+        pdf.cell(20, 8, 'DDV%', 1, 0, 'C', True)
+        pdf.cell(30, 8, 'Znesek', 1, 1, 'R', True)
+    else:
+        pdf.cell(95, 8, 'Opis storitve/izdelka', 1, 0, 'L', True)
+        pdf.cell(12, 8, 'Kol.', 1, 0, 'C', True)
+        pdf.cell(13, 8, 'EM', 1, 0, 'C', True)
+        pdf.cell(25, 8, 'Cena/en.', 1, 0, 'R', True)
+        pdf.cell(15, 8, 'Pop.%', 1, 0, 'C', True)
+        pdf.cell(30, 8, 'Znesek', 1, 1, 'R', True)
     
     pdf.set_font('DejaVu', '', 9)
     for it in items:
@@ -739,26 +748,30 @@ def generate_pdf_invoice(invoice_data, company_data, partner_data, items):
         y = pdf.get_y()
         
         desc = it.get('opis', '')
-        pdf.multi_cell(85, 6, desc, border=1)
+        w_opis = 75 if is_zavezanec else 95
+        pdf.multi_cell(w_opis, 6, desc, border=1)
         new_y = pdf.get_y()
         row_h = new_y - y
         
         # Zapolnimo ostala polja v isti vrstici
-        pdf.set_xy(x + 85, y)
-        pdf.cell(15, row_h, str(it.get('kolicina', 1)), 1, 0, 'C')
+        pdf.set_xy(x + w_opis, y)
+        pdf.cell(12, row_h, str(it.get('kolicina', 1)), 1, 0, 'C')
+        pdf.cell(13, row_h, it.get('enota_mere', 'kos'), 1, 0, 'C')
         pdf.cell(25, row_h, format_money(it.get('cena_enote', 0)), 1, 0, 'R')
         pdf.cell(15, row_h, f"{it.get('popust', 0)}%", 1, 0, 'C')
-        pdf.cell(20, row_h, f"{it.get('stopnja_ddv', 22)}%", 1, 0, 'C')
+        if is_zavezanec:
+            pdf.cell(20, row_h, f"{it.get('stopnja_ddv', 22)}%", 1, 0, 'C')
         pdf.cell(30, row_h, format_money(it.get('znesek_skupaj', 0)), 1, 1, 'R')
         
     pdf.ln(5)
     
     # Celotni znesek (na desni)
     pdf.set_font('DejaVu', '', 10)
-    pdf.cell(160, 6, 'Skupaj brez DDV:', 0, 0, 'R')
-    pdf.cell(30, 6, format_money(invoice_data.get('znesek_brez_ddv', 0)), 0, 1, 'R')
-    pdf.cell(160, 6, 'DDV (22%):', 0, 0, 'R')
-    pdf.cell(30, 6, format_money(invoice_data.get('znesek_ddv', 0)), 0, 1, 'R')
+    if is_zavezanec:
+        pdf.cell(160, 6, 'Skupaj brez DDV:', 0, 0, 'R')
+        pdf.cell(30, 6, format_money(invoice_data.get('znesek_brez_ddv', 0)), 0, 1, 'R')
+        pdf.cell(160, 6, 'DDV (22%):', 0, 0, 'R')
+        pdf.cell(30, 6, format_money(invoice_data.get('znesek_ddv', 0)), 0, 1, 'R')
     
     pdf.ln(2)
     pdf.set_font('DejaVu', 'B', 12)
@@ -1568,9 +1581,9 @@ async def _save_imported_eslog(data):
         # 4. Postavke
         for it in data['postavke']:
             cursor.execute("""
-                INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (doc_id, it['opis'], it['kolicina'], it['cena_enote'], it['stopnja_ddv'], it['znesek_skupaj'], it.get('konto')))
+                INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto, enota_mere)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (doc_id, it['opis'], it['kolicina'], it['cena_enote'], it['stopnja_ddv'], it['znesek_skupaj'], it.get('konto'), it.get('enota_mere', 'kos')))
         
         conn.commit()
         return doc_id
@@ -2056,6 +2069,7 @@ class DokumentPostavka(BaseModel):
     znesek_skupaj: float
     konto: Optional[str] = None
     popust: float = 0.0
+    enota_mere: Optional[str] = 'kos'
 
 class Dokument(BaseModel):
     id: Optional[int] = None
@@ -2179,9 +2193,9 @@ def create_dokument(doc: Dokument):
     doc_id = cursor.lastrowid
     for p in doc.postavke:
         cursor.execute("""
-            INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto, popust)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (doc_id, p.opis, p.kolicina, p.cena_enote, p.stopnja_ddv, p.znesek_skupaj, p.konto, p.popust))
+            INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto, popust, enota_mere)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (doc_id, p.opis, p.kolicina, p.cena_enote, p.stopnja_ddv, p.znesek_skupaj, p.konto, p.popust, p.enota_mere))
     
     conn.commit()
     
@@ -2223,9 +2237,9 @@ def update_dokument(id: int, doc: Dokument):
     # Vstavljanje novih postavk
     for p in doc.postavke:
         cursor.execute("""
-            INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto, popust)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (id, p.opis, p.kolicina, p.cena_enote, p.stopnja_ddv, p.znesek_skupaj, p.konto, p.popust))
+            INSERT INTO dokumenti_postavke (dokument_id, opis, kolicina, cena_enote, stopnja_ddv, znesek_skupaj, konto, popust, enota_mere)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (id, p.opis, p.kolicina, p.cena_enote, p.stopnja_ddv, p.znesek_skupaj, p.konto, p.popust, p.enota_mere))
     
     conn.commit()
     
