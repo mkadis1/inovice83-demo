@@ -319,7 +319,7 @@ window.refreshCurrentModule = function() {
     else if (mod === 'zaposleni') renderZaposleni();
     else if (mod === 'potni_nalogi') renderPotniNalogi();
     else if (mod === 'osnovna_sredstva') renderOsnovnaSredstva();
-    else if (mod === 'place') renderPrispevki();
+    else if (mod === 'place') renderPlace();
     else if (mod === 'konti') osveziKontiUI();
     else if (['izdani_racuni', 'prejeti_racuni', 'ponudbe', 'dobropisi'].includes(mod)) {
         const titles = { 'izdani_racuni': 'Izdani računi', 'prejeti_racuni': 'Prejeti računi', 'ponudbe': 'Ponudbe', 'dobropisi': 'Dobropisi' };
@@ -4623,7 +4623,7 @@ async function renderPlace() {
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 15px;">
                 <h2 style="margin:0; color:var(--primary-blue);">Obračun plač in prispevkov</h2>
                 <div style="display: flex; gap: 15px; align-items: center;">
-                    ${window.renderSortControls('prispevki', sortFields, 'window.renderPlace()')}
+                    ${window.renderSortControls('prispevki', sortFields, 'renderPlace()')}
                     <button class="btn btn-blue" onclick="window.showDodajPlaco()">+ Nov obračun</button>
                 </div>
             </div>
@@ -4659,8 +4659,10 @@ async function renderPlace() {
                         <td style="text-align:right;">${formatMoneyJS(p.bruto_placa)}</td>
                         <td style="text-align:right; font-weight:bold;">${formatMoneyJS(p.znesek_skupaj)}</td>
                         <td style="text-align:right;">
-                            <span style="color:${statusColor}">${p.placan ? 'Plačano' : 'Odprto'}</span>
-                            ${p.knjizeno ? '<span style="background:#e3fafc; color:#1098ad; padding:3px 8px; border-radius:10px; font-size:0.8em; text-transform:uppercase; font-weight:bold; margin-left:5px;" title="Dokument je bil knjižen v glavno knjigo">Zaprto</span>' : ''}
+                            ${p.knjizeno 
+                                ? '<span style="background:#e3fafc; color:#1098ad; padding:3px 8px; border-radius:10px; font-size:0.8em; text-transform:uppercase; font-weight:bold;" title="Knjiženo v glavno knjigo">Zaprto</span>'
+                                : `<span style="background:${p.placan ? '#d3f9d8' : '#f1f3f5'}; color:${p.placan ? '#2b8a3e' : '#e03131'}; padding:3px 8px; border-radius:10px; font-size:0.8em; text-transform:uppercase; font-weight:bold;">${p.placan ? 'Plačano' : 'Odprto'}</span>`
+                            }
                         </td>
                         <td class="action-buttons">
                             ${!p.knjizeno ? `
