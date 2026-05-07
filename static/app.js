@@ -4143,29 +4143,6 @@ window.brisiPotniNalog = async function(id) {
 }
 
 
-async function renderPrispevki() {
-    titleEl.textContent = "Prispevki";
-    contentDiv.innerHTML = '<p>Nalagam...</p>';
-    try {
-        const res = await fetch('/api/prispevki');
-        const data = await res.json();
-        let html = `<table><thead><tr>
-            <th width="40"><input type="checkbox" onclick="window.toggleAllSelection(this.checked, 'place')"></th>
-            <th>Mesec/Leto</th><th>Znesek</th><th width="80" style="text-align:right">Akcije</th></tr></thead><tbody>`;
-            
-        data.forEach(x => {
-            const isChecked = window.appSelection.ids.includes(x.id) ? 'checked' : '';
-            html += `<tr>
-                <td><input type="checkbox" class="row-checkbox" data-id="${x.id}" ${isChecked} onclick="window.toggleItemSelection(${x.id}, 'place')"></td>
-                <td style="cursor:pointer; color:var(--primary-blue); text-decoration:underline;" onclick="window.editGeneric('prispevki', ${x.id}, ${JSON.stringify(x).replace(/"/g, '&quot;')})">${x.mesec}/${x.leto}</td><td>${formatMoneyJS(x.znesek_skupaj)}</td>
-                <td style="text-align:right">
-                    <button class="icon-btn btn-red" onclick="window.brisiGeneric('prispevki', ${x.id}, renderPrispevki)">${ICONS.delete}</button>
-                </td></tr>`;
-        });
-        html += `</tbody></table>`;
-        contentDiv.innerHTML = html;
-    } catch(e) { contentDiv.innerHTML = `<p style="color:red">Napaka pri nalaganju: ${e}</p>`; }
-}
 
 window.editGeneric = function(modul, id, data) {
     let fields = "";
@@ -4196,7 +4173,7 @@ window.saveGeneric = async function(modul, id) {
     await fetch(`/api/${modul}/${id}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
     if(modul === 'osnovna_sredstva') renderOsnovnaSredstva();
     else if(modul === 'potni_nalogi') renderPotniNalogi();
-    else if(modul === 'prispevki') renderPrispevki();
+    else if(modul === 'prispevki') renderPlace();
 }
 
 window.brisiGeneric = async function(modul, id, callback) {
