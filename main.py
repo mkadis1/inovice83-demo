@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional
 import database
+import knjizenje
 import uvicorn
 import requests
 from datetime import datetime
@@ -1783,6 +1784,12 @@ def extract_generic_pdf(content):
     if not pdf_text.strip():
         return None  # Skenirani/slikovni PDF - ni besedila
         
+    try:
+        with open("pdf_debug.txt", "w", encoding="utf-8") as f:
+            f.write(pdf_text)
+    except:
+        pass
+        
     # Globalno čiščenje problematičnih znakov (Artlist em-dash sredi besed, itd.)
     pdf_text = pdf_text.replace('\u2014', '').replace('\u2013', '-')
 
@@ -1827,16 +1834,21 @@ def extract_generic_pdf(content):
         r'(?:Interna\s+številka\s+dok\.\s*:\s*)([A-Z0-9][\w\-]{1,20})',
         r'(?:RA[CČ]UN\s+ŠT\.|Ra[cč]un\s+(?:št\.|#))\s*:?\s*([A-Z0-9][\w\-/\.]{1,30})',
         r'(?<![a-zA-Z])(?:Številka|Stevilka)\s*:\s*([A-Z0-9][\w/\-\.]{1,20})',
+        r'ORDER NUMBER\s*[\n\r]*\s*#?([A-Z0-9]+)', # Sufio / Fanatec
+        r'INVOICE:\s*[\n\r]*.*?\b([A-Z][0-9]{6,10})\b', # Sufio / Fanatec
         r'RAČUN\s+([0-9]+/[0-9]+)',  # BM Racun
         r'RA\s*UN[^\d]+([1-9][A-Z0-9\-_/\.]{5,20})',  # Tuli
         r'Interna\s+številka\s+([\w\-]{3,25})',
-        r'(?:Vaša\s+oznaka.*?Št\.\s+računa.*?)(\d[\w\-/\.]{3,20})(?:\s+\d)',  # Conrad
+        r'Št\.\s*ra[cč]una\s*(?:Številka\s+kupca)?.*?\n.*?\b(\d+-\d+-\d+)\b', # Conrad oblika s tabelo pod "Račun"
+        r'(?:Vaša\s+oznaka.*?Št\.\s+računa.*?)(\d[\w\-/\.]{3,20})(?:\s+\d)',  # Conrad stara oblika
     ], pdf_text)
     if not stevilka or len(stevilka) < 2: stevilka = "Neznano"
 
     # ---- DATUM RAČUNA ----
     datum_raw = first_match([
+        r'Datum\s+ra[cč]una/dostave.*?\n.*?\b(\d{1,2}\.\d{1,2}\.\d{4})\b', # Conrad oblika s tabelo
         r'(?:Datum\s+(?:in\s+ura\s+)?ra[cč]una|Datum\s+dokumenta)\s*[:\s,]+\s*(\d{1,2}[.\s]+\d{1,2}[.\s]+\d{4})',
+        r'ISSUE DATE:\s*[\n\r]*\s*([A-Za-z]+\s+\d{1,2}[,.]?\s+\d{4})', # Sufio / Fanatec
         r'(?:Datum\s+izdaje)\s*[:\s]+\n?(\d{1,2}\.\s*\d{1,2}\.\s*\d{4})',
         r'(?:Invoice\s+Date)\s+[A-Z]?\u2014?([A-Za-z]{2,9}\s+\d{1,2}[,.]?\s+\d{4})',  # Artlist
         r'(?:Datum:\s*)(\d{1,2}\.\d{1,2}\.\d{4})',
@@ -1865,6 +1877,7 @@ def extract_generic_pdf(content):
         r'Skupaj\s+za\s+pla[cč]ilo\s+EUR\s+([0-9]+[,\.][0-9]{2})',
         r'(?:Skupaj\s+za\s+pla[cč]ilo)[:\s€]*([0-9]+[,\.][0-9]{2})',
         r'(?:Skupni\s+znesek(?:\s+v\s+valuti\s+EUR)?)[:\s€]*([0-9]+[,\.][0-9]{2})',
+        r'(?:Znesek\s+za\s+pla[cč]\s*ilo)[:\s€]*([0-9]+[,\.][0-9]{2})', # Conrad "plač ilo"
         r'(?:Pla[cč]ano|PLA.ANO)[:\s€]*([0-9]+[,\.][0-9]{2})\s+EUR',  # Temu/Tuli
         r'SKUPAJ\s+RA[^\s]*\s*UN\s+EUR\s+([0-9]+[,\.][0-9]{2})',  # Tuli encoding
         r'N\s+ZA\s+PLA[^\s]*\s*ILO\s+EUR\s+([0-9]+[,\.][0-9]{2})',  # Tuli encoding
@@ -1950,6 +1963,7 @@ def extract_generic_pdf(content):
     else:
         # SLO dobavitelji: ID za DDV iz prve SI... številke ki ni kupčeva
         vat_matches = re.findall(r'(?:ID\s+(?:za|za:)\s+DDV|ID\s+DDV|Za\s+DDV)[:\s]+SI(\d{8})', pdf_text, re.I)
+        vat_matches += re.findall(r'VAT\s+Registration\s+number\s*:\s*([A-Z0-9]+)', pdf_text, re.I)
         for v in vat_matches:
             if v != '11648236':  # Izključi kupčevo DAV
                 partner_davcna = v; break
@@ -1969,9 +1983,10 @@ def extract_generic_pdf(content):
             lines = [l.strip() for l in pdf_text.split('\n') if l.strip()]
             buyer_keywords = ['miha kadiš', 'sim 83', 'simulatorji', 'dobja vas 253', 'kadiš s.p', 'kupec',
                               'stran 1', 'stran 2', 'stran\xa0', 'st.kopije', 'št.kopije', 'račun za gosta',
-                              'dobavitelj:', 'račun', 'sklicna', 'konstantni', 'ra\u010dun', 's.p. celje', 'ravne na koro']
+                              'dobavitelj:', 'račun', 'sklicna', 'konstantni', 'ra\u010dun', 's.p. celje', 'ravne na koro',
+                              'invoice supplier', 'client', 'prejemnik', 'izdajatelj']
             company_keywords = ['d.o.o', 'd.d.', 's.p.', 'k.d.', 'ltd', 'limited', 'gmbh', 'inc']
-            skip_starts = ('Tel', 'Fax', 'E-po', 'info@', 'www.', 'Stran', 'ZOI', 'EOR', 'IBAN', 'Mat', 'ID', 'Kontaktni', 'Datum', 'Valuta')
+            skip_starts = ('Tel', 'Fax', 'E-po', 'info@', 'www.', 'Stran', 'ZOI', 'EOR', 'IBAN', 'Mat', 'ID', 'Kontaktni', 'Datum', 'Valuta', 'Issue Date', 'Order Number', 'Invoice:')
             for line in lines[:25]:
                 ll = line.lower()
                 if any(k in ll for k in buyer_keywords): continue
@@ -1986,6 +2001,13 @@ def extract_generic_pdf(content):
                     partner_naziv = line
                     break
 
+        # Identifikacija države iz davčne številke
+        if partner_davcna:
+            prefiks = partner_davcna[:2].upper()
+            drzave_map = {'SI': 'Slovenija', 'AT': 'Avstrija', 'DE': 'Nemčija', 'IT': 'Italija', 'HR': 'Hrvaška', 'HU': 'Madžarska', 'GB': 'Združeno kraljestvo', 'IE': 'Irska', 'NL': 'Nizozemska', 'FR': 'Francija', 'ES': 'Španija', 'BE': 'Belgija', 'CZ': 'Češka', 'PL': 'Poljska'}
+            if prefiks in drzave_map:
+                partner_drzava = drzave_map[prefiks]
+
     stopnja_ddv = 0 if vat_val == 0 else 22
     
     # Hevristični poizkus branja postavk računa (Količina * Cena = Skupaj)
@@ -1995,16 +2017,89 @@ def extract_generic_pdf(content):
             line = line.strip()
             if len(line) < 10: continue
             # Preskoči vrstice ki vsebujejo ključne besede za rekapitulacijo
-            if re.search(r'(skupaj|ddv|pla[cč]ilo|znesek|osnova|popust|zapadlost|valuta|stran|iban)', line, re.I): continue
-            m = re.search(r'^(.+?)\s+(\d+[,\.]?\d*)\s*(?:kos|kg|m|kom|ur|h|uro|ura|kosa|kosi|kosov|lit|l|par|kpl|x|)\s+(\d+[,\.]\d{2,4})\s+(\d+[,\.]\d{2,4})\s*$', line, re.I)
+            if re.search(r'(skupaj|ddv|pla[cč]ilo|znesek|osnova|popust|zapadlost|valuta|stran|iban|dobropis|podpis)', line, re.I): continue
+
+            # --- OBLIKA A: Conrad/Reichelt/Farnell ---
+            # npr. "839605 Vijak s cilind. 1PAK K7 12,29 12,29 14,99 14,99"
+            # Stolpci: (šifra) opis kol+EM (DDV_koda) cena_neto vrednost_neto cena_ddv vrednost_ddv
+            m4 = re.search(
+                r'^(?:\d{4,8}\s+)?(.+?)\s+(\d+)\s*(?:PAK|KOM|PC|PCS|KOS|STK|PZ|ST)\b.*?'
+                r'([\d]+[,\.]\d{2,4})\s+([\d]+[,\.]\d{2,4})\s+([\d]+[,\.]\d{2,4})\s+([\d]+[,\.]\d{2,4})\s*$',
+                line, re.I)
+            if m4:
+                opis = m4.group(1).strip().split('\t')[0].strip()
+                kol = float(m4.group(2))
+                # Zadnja 2 stolpca sta cena z DDV in vrednost z DDV
+                cena_ddv = cn(m4.group(5))
+                sk_ddv = cn(m4.group(6))
+                if kol > 0 and cena_ddv > 0 and abs((kol * cena_ddv) - sk_ddv) <= max(0.10, sk_ddv * 0.01):
+                    postavke.append({
+                        "opis": opis,
+                        "kolicina": kol,
+                        "cena_enote": cena_ddv,
+                        "stopnja_ddv": stopnja_ddv,
+                        "znesek_skupaj": sk_ddv
+                    })
+                    continue
+
+            # --- OBLIKA C: Conrad postavke brez količine (npr. Pavšal za prevoz) ---
+            # "Pavšal za prevoz    4,92   4,92   6,00   6,00"
+            m_no_qty = re.search(
+                r'^(.+?)\s+([\d]+[,\.]\d{2,4})\s+([\d]+[,\.]\d{2,4})\s+([\d]+[,\.]\d{2,4})\s+([\d]+[,\.]\d{2,4})\s*$',
+                line, re.I)
+            if m_no_qty:
+                opis = m_no_qty.group(1).strip()
+                cena_ddv = cn(m_no_qty.group(4))
+                sk_ddv = cn(m_no_qty.group(5))
+                # Za postavko brez količine preverimo, ali sta cena in znesek enaka (količina = 1)
+                if cena_ddv > 0 and abs(cena_ddv - sk_ddv) <= max(0.05, sk_ddv * 0.01):
+                    postavke.append({
+                        "opis": opis,
+                        "kolicina": 1.0,
+                        "cena_enote": cena_ddv,
+                        "stopnja_ddv": stopnja_ddv,
+                        "znesek_skupaj": sk_ddv
+                    })
+                    continue
+
+            # --- OBLIKA D: GMT format ---
+            # "11298216 SVEČKA ŽARILNA 4,00 KOM 23,85 35,00 22,00 62,01"
+            # Stolpci: [šifra] Naziv Kol EM MPC_Cena Rabat DDV MPC_Vrednost
+            m_gmt = re.search(
+                r'^(?:[\w\-]{3,20}\s+)?(.+?)\s+(\d+[,\.]\d{2})\s*(?:KOM|KOS|KPL|L|KG|M|PZ|STK|PAR)\s+'
+                r'([\d]+[,\.]\d{2,4})\s+([\d]+[,\.]\d{2})\s+([\d]+[,\.]\d{2})\s+([\d]+[,\.]\d{2})\s*$',
+                line, re.I)
+            if m_gmt:
+                opis = m_gmt.group(1).strip()
+                kol = cn(m_gmt.group(2))
+                cena = cn(m_gmt.group(3)) # MPC cena pred popustom
+                rabat = cn(m_gmt.group(4))
+                ddv_item = cn(m_gmt.group(5))
+                sk = cn(m_gmt.group(6))   # MPC Vrednost
+                izracunano = (kol * cena) * (1 - rabat / 100)
+                if kol > 0 and cena > 0 and abs(izracunano - sk) <= max(0.10, sk * 0.02):
+                    postavke.append({
+                        "opis": opis,
+                        "kolicina": kol,
+                        "cena_enote": round(sk / kol, 4) if kol > 0 else cena,
+                        "stopnja_ddv": ddv_item,
+                        "znesek_skupaj": sk
+                    })
+                    continue
+
+            # --- OBLIKA B: Standardna tabela (opis kolicina [enota] cena skupaj) ---
+            m = re.search(
+                r'^(.+?)\s+(\d+[,\.]?\d*)\s*'
+                r'(?:kos|kg|m|kom|ur|h|uro|ura|kosa|kosi|kosov|lit|l|par|kpl|pak|pc|pcs|stk|pz|x|kom\.?)\s*'
+                r'([\d]+[,\.]\d{2,4})\s+([\d]+[,\.]\d{2,4})\s*$',
+                line, re.I)
             if m:
                 opis = m.group(1).strip()
                 kol = cn(m.group(2))
                 cena = cn(m.group(3))
                 sk = cn(m.group(4))
-                
-                # Sanity check: Količina * Cena enote = Skupaj (+- 5 centov)
-                if kol > 0 and cena > 0 and abs((kol * cena) - sk) <= 0.05:
+                # Sanity check: Količina * Cena enote = Skupaj (+- 2%)
+                if kol > 0 and cena > 0 and abs((kol * cena) - sk) <= max(0.05, sk * 0.02):
                     postavke.append({
                         "opis": opis,
                         "kolicina": kol,
@@ -2012,8 +2107,29 @@ def extract_generic_pdf(content):
                         "stopnja_ddv": stopnja_ddv,
                         "znesek_skupaj": sk
                     })
-    except:
-        pass
+                    continue
+
+            # --- OBLIKA E: Sufio / Fanatec format ---
+            # "ClubSport Button Cluster Pack SKU: CS_BCP 2 39.95 €79.90 €14.41"
+            m_sufio = re.search(
+                r'^(.+?)\s+(\d+)\s+([\d\.,]+)\s+[€$]?([\d\.,]+)\s+[€$]?([\d\.,]+)$',
+                line, re.I)
+            if m_sufio:
+                opis = m_sufio.group(1).strip()
+                kol = float(m_sufio.group(2))
+                cena = cn(m_sufio.group(3))
+                sk = cn(m_sufio.group(4))
+                if kol > 0 and cena > 0 and abs((kol * cena) - sk) <= max(0.05, sk * 0.02):
+                    postavke.append({
+                        "opis": opis,
+                        "kolicina": kol,
+                        "cena_enote": cena,
+                        "stopnja_ddv": stopnja_ddv,
+                        "znesek_skupaj": sk
+                    })
+                    continue
+    except Exception as e:
+        print(f"Napaka pri razčlenjevanju postavk: {e}")
 
     # Prilagoditev: Če so izluščene postavke brez DDV (njihova vsota je blizu net_val), 
     # jim dodamo DDV, saj naša aplikacija pričakuje cene z DDV!
@@ -2152,6 +2268,159 @@ def get_dokument_detajl(id: int):
     res['postavke'] = [dict(i) for i in items]
     res['zadnje_poslano'] = sent_row[0] if sent_row else None
     return res
+
+class KnjiziRequest(BaseModel):
+    temeljnica_id: Optional[int] = None
+    novi_naziv: Optional[str] = None
+
+class BulkKnjizenjeRequest(BaseModel):
+    ids: List[int]
+    akcija: str # 'knjizi' ali 'razknjizi'
+    module: Optional[str] = None # 'place', 'dokumenti', itd.
+    temeljnica_id: Optional[int] = None
+    novi_naziv: Optional[str] = None
+
+@app.post("/api/dokumenti/{id}/knjizi")
+def api_knjizi_dokument(id: int, req: Optional[KnjiziRequest] = None):
+    tid = req.temeljnica_id if req else None
+    naziv = req.novi_naziv if req else None
+    return knjizenje.knjizi_dokument(id, tid, naziv)
+
+@app.post("/api/dokumenti/{id}/razknjizi")
+def api_razknjizi_dokument(id: int):
+    return knjizenje.razknjizi_dokument(id)
+
+@app.post("/api/knjizenje/bulk_knjizi")
+def api_bulk_knjizi(req: BulkKnjizenjeRequest):
+    uspesno = 0
+    napake = []
+    
+    tid = req.temeljnica_id
+    naziv = req.novi_naziv
+    shared_tid = None
+    
+    for doc_id in req.ids:
+        try:
+            if req.akcija == 'knjizi':
+                if tid == -1 or tid is None:
+                    if shared_tid is None:
+                        if req.module == 'place':
+                            res = knjizenje.knjizi_placa(doc_id, None, naziv)
+                        else:
+                            res = knjizenje.knjizi_dokument(doc_id, None, naziv)
+                        shared_tid = res.get('temeljnica_id')
+                    else:
+                        if req.module == 'place':
+                            knjizenje.knjizi_placa(doc_id, shared_tid)
+                        else:
+                            knjizenje.knjizi_dokument(doc_id, shared_tid)
+                else:
+                    if req.module == 'place':
+                        knjizenje.knjizi_placa(doc_id, tid)
+                    else:
+                        knjizenje.knjizi_dokument(doc_id, tid)
+            elif req.akcija == 'razknjizi':
+                if req.module == 'place':
+                    knjizenje.razknjizi_placa(doc_id)
+                else:
+                    knjizenje.razknjizi_dokument(doc_id)
+            uspesno += 1
+        except Exception as e:
+            napake.append(f"Napaka pri elementu {doc_id}: {str(e)}")
+    
+    return {"status": "success", "uspesno": uspesno, "napake": napake}
+
+class TemeljnicaPostavkaIn(BaseModel):
+    konto: str
+    partner_id: Optional[int] = None
+    opis: Optional[str] = ""
+    datum_zapadlosti: Optional[str] = None
+    znesek_v_breme: float = 0.0
+    znesek_v_dobro: float = 0.0
+
+class TemeljnicaIn(BaseModel):
+    poslovno_leto: int
+    vrsta: str
+    stevilka: str
+    datum: str
+    opis: Optional[str] = ""
+    postavke: List[TemeljnicaPostavkaIn]
+
+@app.get("/api/temeljnice")
+def get_temeljnice(leto: int = None):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    if leto:
+        cursor.execute("SELECT t.*, (SELECT SUM(znesek_v_breme) FROM temeljnice_postavke WHERE temeljnica_id = t.id) as promet_breme, (SELECT SUM(znesek_v_dobro) FROM temeljnice_postavke WHERE temeljnica_id = t.id) as promet_dobro FROM temeljnice t WHERE t.poslovno_leto = ? ORDER BY t.datum DESC, t.id DESC", (leto,))
+    else:
+        cursor.execute("SELECT t.*, (SELECT SUM(znesek_v_breme) FROM temeljnice_postavke WHERE temeljnica_id = t.id) as promet_breme, (SELECT SUM(znesek_v_dobro) FROM temeljnice_postavke WHERE temeljnica_id = t.id) as promet_dobro FROM temeljnice t ORDER BY t.datum DESC, t.id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.get("/api/temeljnice/detajl/{id}")
+def get_temeljnica_detajl(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM temeljnice WHERE id = ?", (id,))
+    t = cursor.fetchone()
+    if not t:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Temeljnica ne obstaja")
+    cursor.execute("SELECT p.*, part.naziv as partner_naziv FROM temeljnice_postavke p LEFT JOIN partnerji part ON p.partner_id = part.id WHERE p.temeljnica_id = ?", (id,))
+    postavke = cursor.fetchall()
+    conn.close()
+    res = dict(t)
+    res['postavke'] = [dict(p) for p in postavke]
+    return res
+
+@app.post("/api/temeljnice")
+def create_temeljnica(data: TemeljnicaIn):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO temeljnice (poslovno_leto, vrsta, stevilka, datum, opis, zaklenjeno)
+            VALUES (?, ?, ?, ?, ?, 0)
+        """, (data.poslovno_leto, data.vrsta, data.stevilka, data.datum, data.opis))
+        tid = cursor.lastrowid
+        
+        for p in data.postavke:
+            cursor.execute("""
+                INSERT INTO temeljnice_postavke (temeljnica_id, konto, partner_id, opis, datum_zapadlosti, znesek_v_breme, znesek_v_dobro)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (tid, p.konto, p.partner_id, p.opis, p.datum_zapadlosti, p.znesek_v_breme, p.znesek_v_dobro))
+            
+        conn.commit()
+        return {"status": "success", "id": tid}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.delete("/api/temeljnice/{id}")
+def delete_temeljnica(id: int):
+    conn = database.get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT zaklenjeno, dokument_id FROM temeljnice WHERE id = ?", (id,))
+        t = cursor.fetchone()
+        if t and t['zaklenjeno'] and t['dokument_id']:
+            # Pripada avtomatskemu knjiženju, ne dovolimo brisanja ročno
+            raise HTTPException(status_code=400, detail="Temeljnica je zaklenjena (avtomatska). Za izbris razknjižite izvirni dokument.")
+        
+        cursor.execute("DELETE FROM temeljnice_postavke WHERE temeljnica_id = ?", (id,))
+        cursor.execute("DELETE FROM temeljnice WHERE id = ?", (id,))
+        conn.commit()
+        return {"status": "success"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
 
 @app.post("/api/dokumenti")
 def create_dokument(doc: Dokument):
@@ -2391,6 +2660,16 @@ def update_izpisek(id: int, izpisek: Izpisek):
     conn.commit()
     conn.close()
     return {"status": "success", "postavke_ids": result_ids}
+
+@app.post("/api/izpiski/{id}/knjizi")
+def api_knjizi_izpisek(id: int, req: Optional[KnjiziRequest] = None):
+    tid = req.temeljnica_id if req else None
+    naziv = req.novi_naziv if req else None
+    return knjizenje.knjizi_izpisek(id, tid, naziv)
+
+@app.post("/api/izpiski/{id}/razknjizi")
+def api_razknjizi_izpisek(id: int):
+    return knjizenje.razknjizi_izpisek(id)
 
 def extract_data_from_sepa_xml(content, filename=None):
     """Parses ISO 20022 Camt.053 SEPA XML bank statement"""
@@ -2720,6 +2999,16 @@ def delete_placa(id: int):
     conn.close()
     return {"status": "success"}
 
+@app.post("/api/place/{id}/knjizi")
+def api_knjizi_placa(id: int, req: Optional[KnjiziRequest] = None):
+    tid = req.temeljnica_id if req else None
+    naziv = req.novi_naziv if req else None
+    return knjizenje.knjizi_placa(id, tid, naziv)
+
+@app.post("/api/place/{id}/razknjizi")
+def api_razknjizi_placa(id: int):
+    return knjizenje.razknjizi_placa(id)
+
 # --- OSNOVNA SREDSTVA ---
 class OsnovnoSredstvo(BaseModel):
     id: Optional[int] = None
@@ -2952,6 +3241,26 @@ def delete_potni_nalog(id: int):
     conn.commit()
     conn.close()
     return {"status": "success"}
+
+@app.post("/api/potni_nalogi/{id}/knjizi")
+def api_knjizi_potni_nalog(id: int, req: Optional[KnjiziRequest] = None):
+    tid = req.temeljnica_id if req else None
+    naziv = req.novi_naziv if req else None
+    return knjizenje.knjizi_potni_nalog(id, tid, naziv)
+
+@app.post("/api/potni_nalogi/{id}/razknjizi")
+def api_razknjizi_potni_nalog(id: int):
+    return knjizenje.razknjizi_potni_nalog(id)
+
+@app.post("/api/amortizacija/{leto}/knjizi")
+def api_knjizi_amortizacija(leto: int, req: Optional[KnjiziRequest] = None):
+    tid = req.temeljnica_id if req else None
+    naziv = req.novi_naziv if req else None
+    return knjizenje.knjizi_amortizacija(leto, tid, naziv)
+
+@app.post("/api/amortizacija/{leto}/razknjizi")
+def api_razknjizi_amortizacija(leto: int):
+    return knjizenje.razknjizi_amortizacija(leto)
 
 @app.get("/api/vozila")
 def get_vozila():

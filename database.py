@@ -168,6 +168,7 @@ def init_db():
         znesek_zap REAL,
         znesek_starsevsko REAL,
         znesek_ozp REAL,
+        znesek_do REAL DEFAULT 0,
         znesek_akontacija_doh REAL,
         znesek_skupaj REAL,
         sklic TEXT,
@@ -241,6 +242,42 @@ def init_db():
         status TEXT DEFAULT 'success',
         napaka TEXT
     );
+    
+    -- Glavna knjiga (Temeljnice)
+    CREATE TABLE IF NOT EXISTS temeljnice (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        poslovno_leto INTEGER NOT NULL,
+        vrsta TEXT NOT NULL, -- 'IR' (izdani racuni), 'PR' (prejeti), 'IZP' (izpiski), 'PLA' (place), 'ROC' (rocne)
+        stevilka TEXT NOT NULL,
+        datum DATE NOT NULL,
+        opis TEXT,
+        dokument_id INTEGER, -- opcijska povezava na izvorni dokument
+        zaklenjeno BOOLEAN DEFAULT 0,
+        ustvarjeno_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS temeljnice_postavke (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        temeljnica_id INTEGER NOT NULL,
+        konto TEXT NOT NULL,
+        partner_id INTEGER,
+        opis TEXT,
+        datum_zapadlosti DATE,
+        znesek_v_breme REAL DEFAULT 0,
+        znesek_v_dobro REAL DEFAULT 0,
+        zaprto BOOLEAN DEFAULT 0, -- za vodenje odprtih postavk
+        FOREIGN KEY (temeljnica_id) REFERENCES temeljnice(id),
+        FOREIGN KEY (partner_id) REFERENCES partnerji(id)
+    );
+
+    -- Povezava AJPES sheme s konti (za pripravo izkazov)
+    CREATE TABLE IF NOT EXISTS ajpes_shema (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        oznaka_aop TEXT NOT NULL,
+        naziv TEXT NOT NULL,
+        vrsta_izkaza TEXT NOT NULL, -- 'bilanca_stanja', 'izkaz_poslovnega_izida'
+        formula TEXT -- npr. '+020+021-029' (kateri konti se sestejejo ali odstejejo)
+    );
     """)
     # Migracija: Dodaj kratko_ime v nastavitve, če ne obstaja
     try:
@@ -276,6 +313,24 @@ def init_db():
     try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN email_template_ponudba TEXT")
     except: pass
     try: cursor.execute("ALTER TABLE nastavitve ADD COLUMN email_template_dobropis TEXT")
+    except: pass
+
+    # Migracija: Dodaj znesek_do (dolgotrajna oskrba) v place
+    try: cursor.execute("ALTER TABLE place ADD COLUMN znesek_do REAL DEFAULT 0")
+    except: pass
+
+    # Migracije: Dodaj knjizeno status
+    try: cursor.execute("ALTER TABLE dokumenti ADD COLUMN knjizeno BOOLEAN DEFAULT 0")
+    except: pass
+    try: cursor.execute("ALTER TABLE izpiski_glava ADD COLUMN knjizeno BOOLEAN DEFAULT 0")
+    except: pass
+    try: cursor.execute("ALTER TABLE place ADD COLUMN knjizeno BOOLEAN DEFAULT 0")
+    except: pass
+    try: cursor.execute("ALTER TABLE potni_nalogi ADD COLUMN knjizeno BOOLEAN DEFAULT 0")
+    except: pass
+    try: cursor.execute("ALTER TABLE temeljnice_postavke ADD COLUMN dokument_id INTEGER")
+    except: pass
+    try: cursor.execute("ALTER TABLE temeljnice_postavke ADD COLUMN dokument_tip TEXT")
     except: pass
 
     conn.commit()

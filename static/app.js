@@ -23,7 +23,9 @@ const ICONS = {
     send: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`,
     liquidate: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"></path><path d="M8 3H3v5"></path><path d="M12 22v-8.3"></path><path d="M12 13.7l3 3"></path><path d="M12 13.7l-3 3"></path><path d="M5 21h14"></path></svg>`,
     invoice: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>`,
-    copy: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`
+    copy: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
+    book: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>`,
+    unbook: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path><line x1="3" y1="3" x2="21" y2="21"></line></svg>`
 };
 
 // Globalni dodatni slogi za UI
@@ -37,7 +39,12 @@ uiStyles.innerHTML = `
         padding: 0; line-height: 0;
     }
     .icon-btn:hover { background: #e9ecef; color: var(--primary-blue); border-color: #adb5bd; transform: translateY(-1px); }
+    .icon-btn.btn-red { color: var(--primary-red); border-color: #ffc9c9; background: #fff5f5; }
     .icon-btn.btn-red:hover { color: white; background: var(--primary-red); border-color: var(--primary-red); }
+    .icon-btn.btn-green { color: #2b8a3e; border-color: #c3e6cb; background: #ebfbee; }
+    .icon-btn.btn-green:hover { color: white; background: #2b8a3e; border-color: #2b8a3e; }
+    .icon-btn.btn-orange { color: #f08c00; border-color: #ffeeba; background: #fff9db; }
+    .icon-btn.btn-orange:hover { color: white; background: #f08c00; border-color: #f08c00; }
     .attachment-actions { display: flex; gap: 10px; margin-top: 10px; padding: 10px; background: #f8f9fa; border-top: 1px solid #eee; border-radius: 0 0 8px 8px; }
     
     .bulk-action-bar {
@@ -104,6 +111,15 @@ window.updateBulkActionBar = function() {
         bar.innerHTML = `
             <div style="font-weight:600; font-size:0.95em;">Izbrano: ${count}</div>
             <div style="width:1px; height:20px; background:rgba(255,255,255,0.2);"></div>
+            ${['izdani_racuni', 'prejeti_racuni', 'place'].includes(window.appSelection.module) ? `
+                <button class="btn" onclick="window.bulkExecuteKnjizi('knjizi')" style="background:#2b8a3e; color:white; padding: 6px 16px; font-size:0.9em; border:none;">
+                    ${ICONS.book} Knjiži izbrane
+                </button>
+                <button class="btn" onclick="window.bulkExecuteKnjizi('razknjizi')" style="background:#e67700; color:white; padding: 6px 16px; font-size:0.9em; border:none;">
+                    ${ICONS.unbook} Razknjiži izbrane
+                </button>
+                <div style="width:1px; height:20px; background:rgba(255,255,255,0.2);"></div>
+            ` : ''}
             <button class="btn btn-red" onclick="window.bulkExecuteDelete()" style="padding: 6px 16px; font-size:0.9em;">
                 ${ICONS.delete} Izbriši izbrane
             </button>
@@ -140,6 +156,159 @@ window.bulkExecuteDelete = async function() {
     } catch (e) {
         console.error(e);
         alert("Napaka pri komunikaciji s strežnikom.");
+    }
+};
+
+window.bulkExecuteKnjizi = async function(akcija) {
+    const count = window.appSelection.ids.length;
+    if (!count) return;
+    
+    if (akcija === 'razknjizi') {
+        if (!confirm(`Ali ste prepričani, da želite razknjižiti ${count} izbranih dokumentov?`)) return;
+        izvediBulkKnjizenje('razknjizi', null, null);
+    } else {
+        odpriTemeljnicaPopup(function(tid, naziv) {
+            izvediBulkKnjizenje('knjizi', tid, naziv);
+        });
+    }
+};
+
+async function izvediBulkKnjizenje(akcija, temeljnica_id, novi_naziv) {
+    try {
+        const payload = { 
+            ids: window.appSelection.ids, 
+            akcija: akcija,
+            module: window.appSelection.module
+        };
+        if (temeljnica_id) payload.temeljnica_id = temeljnica_id;
+        if (novi_naziv) payload.novi_naziv = novi_naziv;
+        
+        const res = await fetch('/api/knjizenje/bulk_knjizi', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+        if (res.ok) {
+            const data = await res.json();
+            const napakeMsg = data.napake.length ? `\nNapake (${data.napake.length}):\n` + data.napake.join('\n') : '';
+            alert(`Uspešno knjiženih: ${data.uspesno}${napakeMsg}`);
+            window.appSelection.ids = [];
+            window.updateBulkActionBar();
+            // Refresh the correct module
+            const mod = window.appSelection.module || window._currentDocTip;
+            if (['izdani_racuni', 'prejeti_racuni', 'ponudbe', 'dobropisi'].includes(mod)) {
+                const titles = { 'izdani_racuni': 'Izdani računi', 'prejeti_racuni': 'Prejeti računi', 'ponudbe': 'Ponudbe', 'dobropisi': 'Dobropisi' };
+                renderDokumenti(mod, titles[mod]);
+            } else if (mod === 'place') {
+                renderPlace();
+            } else {
+                window.refreshCurrentModule();
+            }
+        } else {
+            alert("Napaka pri skupinskem knjiženju.");
+        }
+    } catch (e) {
+        console.error(e);
+        alert("Napaka pri komunikaciji s strežnikom.");
+    }
+}
+
+window.knjiziPosamezen = async function(id, akcija, tip) {
+    if (akcija === 'razknjizi') {
+        if (!confirm(`Ali želite razknjižiti ta dokument?`)) return;
+        izvediKnjiziPosamezen(id, 'razknjizi', null, null, tip);
+    } else {
+        odpriTemeljnicaPopup(function(tid, naziv) {
+            izvediKnjiziPosamezen(id, 'knjizi', tid, naziv, tip);
+        });
+    }
+};
+
+async function izvediKnjiziPosamezen(id, akcija, temeljnica_id, novi_naziv, tip) {
+    try {
+        let url = `/api/dokumenti/${id}/${akcija}`;
+        if (tip === 'izpiski') url = `/api/izpiski/${id}/${akcija}`;
+        if (tip === 'potni_nalogi') url = `/api/potni_nalogi/${id}/${akcija}`;
+        if (tip === 'place') url = `/api/place/${id}/${akcija}`;
+        
+        const payload = {};
+        if (temeljnica_id) payload.temeljnica_id = temeljnica_id;
+        if (novi_naziv) payload.novi_naziv = novi_naziv;
+        
+        const res = await fetch(url, { 
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: akcija === 'knjizi' ? JSON.stringify(payload) : null
+        });
+        if (res.ok) {
+            // Use the passed tip first, then fallback to appSelection.module
+            const activeModule = tip || window.appSelection.module;
+            if (['izdani_racuni', 'prejeti_racuni', 'ponudbe', 'dobropisi'].includes(activeModule)) {
+                const titles = { 'izdani_racuni': 'Izdani računi', 'prejeti_racuni': 'Prejeti računi', 'ponudbe': 'Ponudbe', 'dobropisi': 'Dobropisi' };
+                renderDokumenti(activeModule, titles[activeModule]);
+            } else if (activeModule === 'izpiski') {
+                renderIzpiski();
+            } else if (activeModule === 'potni_nalogi') {
+                renderPotniNalogi();
+            } else {
+                window.refreshCurrentModule();
+            }
+        } else {
+            const err = await res.json();
+            alert(`Napaka pri ${akcija === 'knjizi' ? 'knjiženju' : 'razknjiženju'}: ` + (err.detail || ""));
+        }
+    } catch(e) { alert("Napaka komunikacije s strežnikom."); }
+}
+
+let onTemeljnicaPopupConfirm = null;
+
+window.onTemeljnicaSelectChange = function() {
+    const sel = document.getElementById('tp_izbira_temeljnice');
+    const wrapper = document.getElementById('tp_novi_naziv_wrapper');
+    if (wrapper) wrapper.style.display = (sel.value === '-1') ? 'block' : 'none';
+};
+
+window.odpriTemeljnicaPopup = async function(callback) {
+    onTemeljnicaPopupConfirm = callback;
+    document.getElementById('temeljnica-popup-overlay').style.display = 'flex';
+    
+    const sel = document.getElementById('tp_izbira_temeljnice');
+    sel.innerHTML = '<option value="-1">-- Ustvari NOVO temeljnico --</option>';
+    const nazivEl = document.getElementById('tp_novi_naziv');
+    if (nazivEl) nazivEl.value = '';
+    const wrapper = document.getElementById('tp_novi_naziv_wrapper');
+    if (wrapper) wrapper.style.display = 'block';
+    
+    try {
+        const leto = getLeto();
+        const res = await fetch(`/api/temeljnice?leto=${leto}`);
+        if (res.ok) {
+            const data = await res.json();
+            data.forEach(t => {
+                const opt = document.createElement('option');
+                opt.value = t.id;
+                opt.textContent = `${t.vrsta} ${t.stevilka} (${t.datum}) - ${t.opis || ''}`;
+                sel.appendChild(opt);
+            });
+        }
+    } catch(e) { console.error(e); }
+};
+
+window.zapriTemeljnicaPopup = function() {
+    document.getElementById('temeljnica-popup-overlay').style.display = 'none';
+    onTemeljnicaPopupConfirm = null;
+};
+
+window.potrdiTemeljnicaPopup = function() {
+    const sel = document.getElementById('tp_izbira_temeljnice');
+    const tid = parseInt(sel.value);
+    const nazivEl = document.getElementById('tp_novi_naziv');
+    const naziv = (tid === -1 && nazivEl) ? nazivEl.value.trim() : null;
+    document.getElementById('temeljnica-popup-overlay').style.display = 'none';
+    if (onTemeljnicaPopupConfirm) {
+        onTemeljnicaPopupConfirm(tid, naziv);
+        onTemeljnicaPopupConfirm = null;
     }
 };
 
@@ -397,6 +566,8 @@ async function showModule(moduleName) {
         renderDokumenti(moduleName, titleMap[moduleName]);
     } else if (moduleName === 'izpiski') {
         renderIzpiski();
+    } else if (moduleName === 'glavna_knjiga') {
+        renderGlavnaKnjiga();
     } else if (moduleName === 'osnovna_sredstva') {
         renderOsnovnaSredstva();
     } else if (moduleName === 'potni_nalogi') {
@@ -1023,9 +1194,15 @@ async function renderDokumenti(tip, naslov) {
                                          padding:3px 8px; border-radius:10px; font-size:0.8em; text-transform:uppercase; font-weight:bold;">
                                 ${d.status || 'neplačano'}
                             </span>
+                            ${d.knjizeno ? '<span style="background:#e3fafc; color:#1098ad; padding:3px 8px; border-radius:10px; font-size:0.8em; text-transform:uppercase; font-weight:bold; margin-left:5px;" title="Dokument je bil knjižen v glavno knjigo">Knjiženo</span>' : ''}
                         </td>
                         <td class="action-buttons">
-                            ${tip === 'ponudbe' ? `<button class="icon-btn" onclick="window.ustvariRacunIzPonudbe(${d.id})" title="Ustvari račun" style="color:#2b8a3e; border-color:#2b8a3e;">${ICONS.invoice}</button>` : ''}
+                            ${(tip === 'izdani_racuni' || tip === 'prejeti_racuni') ? 
+                                (!d.knjizeno ? 
+                                    `<button class="icon-btn btn-green" onclick="window.knjiziPosamezen(${d.id}, 'knjizi', '${tip}')" title="Knjiži">${ICONS.book}</button>` : 
+                                    `<button class="icon-btn btn-orange" onclick="window.knjiziPosamezen(${d.id}, 'razknjizi', '${tip}')" title="Razknjiži">${ICONS.unbook}</button>`
+                                ) : ''}
+                            ${tip === 'ponudbe' ? `<button class="icon-btn btn-green" onclick="window.ustvariRacunIzPonudbe(${d.id})" title="Ustvari račun">${ICONS.invoice}</button>` : ''}
                             <button class="icon-btn" onclick="window.kopirajDokument(${d.id}, '${tip}', '${naslov}')" title="Kopiraj">${ICONS.copy}</button>
                             <button class="icon-btn btn-red" onclick="brisiDokument(${d.id}, '${tip}', '${naslov}')" title="Briši">${ICONS.delete}</button>
                         </td>
@@ -1959,27 +2136,35 @@ async function showImportPreview(data) {
             // Ponovno preberi postavke iz tabele
             const novePostavke = [];
             let novSkupaj = 0;
-            document.querySelectorAll('.import-p-row').forEach(tr => {
+            let novBrezDDV = 0;
+            // Stopnja DDV iz originalnih podatkov (privzeta 22 če ni podana)
+            const defaultDdvStopnja = (data.postavke && data.postavke.length > 0 && data.postavke[0].stopnja_ddv != null)
+                ? data.postavke[0].stopnja_ddv : 22;
+            document.querySelectorAll('.import-p-row').forEach((tr, idx) => {
                 const opis = tr.querySelector('.i-p-opis').value;
                 const kol = parseNumberJS(tr.querySelector('.i-p-kol').value) || 1;
                 const em = tr.querySelector('.i-p-em').value || 'kos';
                 const cena = parseNumberJS(tr.querySelector('.i-p-cena').value) || 0;
-                const znesek = kol * cena;
+                const znesek = Math.round(kol * cena * 100) / 100;
+                // Ohranjamo stopnjo DDV iz originalnih podatkov za vsako postavko
+                const stopnja = (data.postavke && data.postavke[idx] && data.postavke[idx].stopnja_ddv != null)
+                    ? data.postavke[idx].stopnja_ddv : defaultDdvStopnja;
                 novePostavke.push({
                     opis: opis,
                     kolicina: kol,
                     enota_mere: em,
                     cena_enote: cena,
-                    stopnja_ddv: 22,
+                    stopnja_ddv: stopnja,
                     znesek_skupaj: znesek,
                     konto: globalKonto || ""
                 });
                 novSkupaj += znesek;
+                novBrezDDV += (stopnja > 0) ? znesek / (1 + stopnja / 100) : znesek;
             });
             data.postavke = novePostavke;
-            data.znesek_skupaj = novSkupaj;
-            data.znesek_brez_ddv = novSkupaj / 1.22; // Poenostavljeno
-            data.znesek_ddv = novSkupaj - data.znesek_brez_ddv;
+            data.znesek_skupaj = Math.round(novSkupaj * 100) / 100;
+            data.znesek_brez_ddv = Math.round(novBrezDDV * 100) / 100;
+            data.znesek_ddv = Math.round((novSkupaj - novBrezDDV) * 100) / 100;
             
             data.placan = isPaid;
 
@@ -2118,6 +2303,10 @@ async function renderIzpiski() {
                         <td>${formatNumberJS(d.koncno_stanje)} &euro;</td>
                         <td style="font-weight:bold; color:${col}">${statusK}</td>
                         <td class="action-buttons">
+                            ${d.knjizeno ? 
+                                `<button class="icon-btn btn-orange" onclick="knjiziPosamezen(${d.id}, 'razknjizi', 'izpiski')" title="Razknjiži">${ICONS.unbook || '🔓'}</button>` :
+                                `<button class="icon-btn btn-green" onclick="knjiziPosamezen(${d.id}, 'knjizi', 'izpiski')" title="Knjiži">${ICONS.book || '📖'}</button>`
+                            }
                             <button class="icon-btn btn-red" onclick="brisiIzpisek(${d.id})" title="Briši">${ICONS.delete}</button>
                         </td>
                     </tr>
@@ -3360,8 +3549,7 @@ window.shraniOsnovnoSredstvo = async function(e, id) {
             body: JSON.stringify(payload)
         });
         if(res.ok) {
-            const saved = await res.json();
-            window.showDodajOsnovnoSredstvo(saved);
+            window.renderOsnovnaSredstva();
         } else {
             alert('Napaka pri shranjevanju.');
         }
@@ -3623,6 +3811,10 @@ async function renderPotniNalogi() {
                     <td style="font-size:0.85em; padding:10px;">Od: ${p.relacija_zacetek||''}<br>Do: ${p.relacija_cilj||''}</td>
                     <td style="font-weight:bold; text-align:right; color:#2b8a3e; padding:10px;">${formatMoneyJS(p.skupni_znesek)}</td>
                     <td class="action-buttons">
+                        ${p.knjizeno ? 
+                            `<button class="icon-btn btn-orange" onclick="knjiziPosamezen(${p.id}, 'razknjizi', 'potni_nalogi')" title="Razknjiži">${ICONS.unbook || '🔓'}</button>` :
+                            `<button class="icon-btn btn-green" onclick="knjiziPosamezen(${p.id}, 'knjizi', 'potni_nalogi')" title="Knjiži">${ICONS.book || '📖'}</button>`
+                        }
                         <button class="icon-btn btn-red" onclick="window.brisiPotniNalog(${p.id})" title="Briši">${ICONS.delete}</button>
                     </td>
                 </tr>`;
@@ -4438,6 +4630,7 @@ async function renderPlace() {
             <table>
                 <thead>
                     <tr>
+                        <th width="40"><input type="checkbox" onclick="window.toggleAllSelection(this.checked, 'place')"></th>
                         <th>Mesec / Leto</th>
                         <th>Zaposleni</th>
                         <th>Vrsta</th>
@@ -4456,17 +4649,27 @@ async function renderPlace() {
             let sortirano = window.sortAppData(data, 'prispevki');
             sortirano.forEach(p => {
                 const statusColor = p.placan ? '#2b8a3e' : '#e03131';
+                const isChecked = window.appSelection.ids.includes(p.id) ? 'checked' : '';
                 html += `
                     <tr>
+                        <td><input type="checkbox" class="row-checkbox" data-id="${p.id}" ${isChecked} onclick="window.toggleItemSelection(${p.id}, 'place')"></td>
                         <td>${p.mesec} / ${p.leto}</td>
                         <td style="font-weight:bold;">${p.zaposleni_ime || '/'}</td>
                         <td style="font-size:0.9em;">${p.vrsta_zaposlitve.toUpperCase()}</td>
                         <td style="text-align:right;">${formatMoneyJS(p.bruto_placa)}</td>
                         <td style="text-align:right; font-weight:bold;">${formatMoneyJS(p.znesek_skupaj)}</td>
-                        <td style="text-align:right;"><span style="color:${statusColor}">${p.placan ? 'Plačano' : 'Odprto'}</span></td>
+                        <td style="text-align:right;">
+                            <span style="color:${statusColor}">${p.placan ? 'Plačano' : 'Odprto'}</span>
+                            ${p.knjizeno ? '<span style="background:#e3fafc; color:#1098ad; padding:3px 8px; border-radius:10px; font-size:0.8em; text-transform:uppercase; font-weight:bold; margin-left:5px;" title="Dokument je bil knjižen v glavno knjigo">Zaprto</span>' : ''}
+                        </td>
                         <td class="action-buttons">
-                            <button class="icon-btn" onclick='window.showDodajPlaco(${JSON.stringify(p).replace(/'/g,"&apos;")})' title="Uredi">${ICONS.edit}</button>
-                            <button class="icon-btn btn-red" onclick="window.brisiPlaco(${p.id})" title="Briši">${ICONS.delete}</button>
+                            ${!p.knjizeno ? `
+                                <button class="icon-btn" onclick='window.showDodajPlaco(${JSON.stringify(p).replace(/'/g,"&apos;")})' title="Uredi">${ICONS.edit}</button>
+                                <button class="icon-btn btn-green" onclick="window.knjiziPosamezen(${p.id}, 'knjizi', 'place')" title="Knjiži">${ICONS.book}</button>
+                                <button class="icon-btn btn-red" onclick="window.brisiPlaco(${p.id})" title="Briši">${ICONS.delete}</button>
+                            ` : `
+                                <button class="icon-btn btn-orange" onclick="window.knjiziPosamezen(${p.id}, 'razknjizi', 'place')" title="Razknjiži">${ICONS.unbook}</button>
+                            `}
                         </td>
                     </tr>
                 `;
@@ -4735,8 +4938,7 @@ window.shraniPlaco = async function(e, id) {
             body: JSON.stringify(pay)
         });
         if(res.ok) {
-            const saved = await res.json();
-            window.showDodajPlaco(saved);
+            window.renderPlace();
         }
     } catch(e) { alert("Napaka pri shranjevanju."); }
 };
@@ -5252,8 +5454,20 @@ async function renderHelp() {
                     
                     <div style="margin-bottom:25px;">
                         <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-                            <span style="background:var(--primary-blue); color:white; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">04. 05. 2026</span>
+                            <span style="background:var(--primary-blue); color:white; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">07. 05. 2026</span>
                             <span style="color:#666; font-size:0.9rem;">Zadnja posodobitev</span>
+                        </div>
+                        <ul style="margin-top:5px; padding-left:20px;">
+                            <li><strong>Knjiženje plač:</strong> Implementiran celoten sistem knjiženja obračunov plač in prispevkov v glavno knjigo (temeljnice).</li>
+                            <li><strong>Status "Zaprto":</strong> Obračuni zdaj sledijo statusu knjiženja; ko je dokument knjižen, dobi oznako "Zaprto" in se zaklene za urejanje.</li>
+                            <li><strong>Množične akcije:</strong> Dodana podpora za skupinsko knjiženje in razknjiževanje obračunov neposredno iz seznama.</li>
+                            <li><strong>Glavna knjiga:</strong> Avtomatska porazdelitev stroškov na ustrezne konte (bruto plače, neto izplačila, prispevki, dohodnina).</li>
+                        </ul>
+                    </div>
+
+                    <div style="margin-bottom:25px; padding-top:15px; border-top:1px dashed #eee;">
+                        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                            <span style="background:#f1f3f5; color:#495057; padding:4px 10px; border-radius:20px; font-size:0.85rem; font-weight:bold;">04. 05. 2026</span>
                         </div>
                         <ul style="margin-top:5px; padding-left:20px;">
                             <li><strong>DDV upravljanje:</strong> Dokumenti se samodejno prilagodijo glede na status davčnega zavezanca — ne-zavezanci ne vidijo DDV stolpcev na računih in ponudbah.</li>
@@ -5459,4 +5673,380 @@ async function renderHelp() {
     window.renderHelpList();
 }
 
+window.knjiziAmortizacijo = async function() {
+    const leto = getLeto();
+    if (!confirm(`Ali želite knjižiti letno amortizacijo za leto ${leto}?`)) return;
+    
+    odpriTemeljnicaPopup(async function(tid, naziv) {
+        try {
+            const res = await fetch(`/api/amortizacija/${leto}/knjizi`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ temeljnica_id: tid, novi_naziv: naziv })
+            });
+            if (res.ok) {
+                alert("Amortizacija uspešno knjižena.");
+                renderGlavnaKnjiga();
+            } else {
+                const err = await res.json();
+                alert("Napaka: " + (err.detail || ""));
+            }
+        } catch(e) { alert("Napaka komunikacije."); }
+    });
+};
+
+// --- GLAVNA KNJIGA ---
+async function renderGlavnaKnjiga() {
+    titleEl.textContent = "Glavna knjiga (Temeljnice)";
+    contentDiv.innerHTML = '<p>Nalagam...</p>';
+    const leto = getLeto();
+    
+    try {
+        const res = await fetch(`/api/temeljnice?leto=${leto}`);
+        const data = await res.json();
+        
+        let html = `
+            <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn btn-blue" onclick="showDodajTemeljnico()">+ Nova ročna temeljnica</button>
+                    <button class="btn" style="background:#5c7cfa; color:white;" onclick="knjiziAmortizacijo()">Knjiži amortizacijo za leto ${leto}</button>
+                </div>
+            </div>
+            <table class="tbl-dash" style="width:100%;">
+                <thead>
+                    <tr>
+                        <th>Številka</th>
+                        <th>Vrsta</th>
+                        <th>Datum</th>
+                        <th>Opis</th>
+                        <th style="text-align:right">Promet V Breme</th>
+                        <th style="text-align:right">Promet V Dobro</th>
+                        <th>Zaklenjeno</th>
+                        <th style="text-align:right" width="80">Akcije</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+        
+        if (data.length === 0) {
+            html += `<tr><td colspan="8" style="text-align:center">V letu ${leto} ni knjiženih temeljnic.</td></tr>`;
+        } else {
+            data.forEach(t => {
+                const isBalanced = Math.abs((t.promet_breme || 0) - (t.promet_dobro || 0)) < 0.01;
+                html += `
+                    <tr>
+                        <td><span style="color:var(--primary-blue); font-weight:bold; cursor:pointer; text-decoration:underline;" onclick="showTemeljnicaDetajl(${t.id})">${t.stevilka}</span></td>
+                        <td><span style="background:#e9ecef; padding:3px 8px; border-radius:10px; font-size:0.8em; font-weight:bold;">${t.vrsta}</span></td>
+                        <td>${formatDateJS(t.datum)}</td>
+                        <td>${t.opis || ''}</td>
+                        <td style="text-align:right; font-weight:bold;">${formatNumberJS(t.promet_breme || 0)}</td>
+                        <td style="text-align:right; font-weight:bold; color:${isBalanced ? '#2b8a3e' : '#e03131'};">${formatNumberJS(t.promet_dobro || 0)}</td>
+                        <td>${t.zaklenjeno ? '<span style="color:#868e96;" title="Ustvarjeno avtomatsko">🔒 DA</span>' : 'NE'}</td>
+                        <td class="action-buttons">
+                            <button class="icon-btn btn-red" onclick="brisiTemeljnico(${t.id}, ${t.zaklenjeno})" title="Briši">${ICONS.delete}</button>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+        
+        html += `</tbody></table>`;
+        contentDiv.innerHTML = html;
+        
+    } catch (e) {
+        contentDiv.innerHTML = `<p style="color:red">Napaka pri nalaganju glavne knjige.</p>`;
+    }
+}
+
+async function showTemeljnicaDetajl(id) {
+    contentDiv.innerHTML = '<p>Nalagam detajle...</p>';
+    try {
+        const res = await fetch(`/api/temeljnice/detajl/${id}`);
+        if (!res.ok) throw new Error("Ni mogoče naložiti temeljnice");
+        const t = await res.json();
+        
+        let html = `
+            <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-top: 4px solid var(--primary-blue);">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                    <h3 style="margin:0; color:var(--primary-blue);">Temeljnica: ${t.stevilka} <span style="font-size:0.7em; color:#868e96; background:#f1f3f5; padding:3px 8px; border-radius:10px; vertical-align:middle;">${t.vrsta}</span></h3>
+                    <button class="btn" onclick="renderGlavnaKnjiga()">Nazaj na seznam</button>
+                </div>
+                
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; background:#f8f9fa; padding:15px; border-radius:6px; margin-bottom:20px;">
+                    <div><strong>Datum:</strong> ${formatDateJS(t.datum)}</div>
+                    <div><strong>Poslovno leto:</strong> ${t.poslovno_leto}</div>
+                    <div style="grid-column: span 2;"><strong>Opis:</strong> ${t.opis || '/'}</div>
+                </div>
+                
+                <h4 style="margin-bottom:10px; color:#495057;">Postavke</h4>
+                <table class="tbl-dash" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th>Konto</th>
+                            <th>Partner</th>
+                            <th>Opis postavke</th>
+                            <th style="text-align:right">V Breme</th>
+                            <th style="text-align:right">V Dobro</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        
+        let sumB = 0, sumD = 0;
+        t.postavke.forEach(p => {
+            sumB += p.znesek_v_breme;
+            sumD += p.znesek_v_dobro;
+            html += `
+                <tr>
+                    <td style="font-weight:bold;">${p.konto}</td>
+                    <td>${p.partner_naziv || '/'}</td>
+                    <td>${p.opis || ''}</td>
+                    <td style="text-align:right;">${p.znesek_v_breme > 0 ? formatNumberJS(p.znesek_v_breme) : ''}</td>
+                    <td style="text-align:right;">${p.znesek_v_dobro > 0 ? formatNumberJS(p.znesek_v_dobro) : ''}</td>
+                </tr>
+            `;
+        });
+        
+        const isBalanced = Math.abs(sumB - sumD) < 0.01;
+        html += `
+                    </tbody>
+                    <tfoot>
+                        <tr style="background:#f1f3f5; font-weight:bold;">
+                            <td colspan="3" style="text-align:right;">Skupaj:</td>
+                            <td style="text-align:right;">${formatNumberJS(sumB)}</td>
+                            <td style="text-align:right; color:${isBalanced?'#2b8a3e':'#e03131'};">${formatNumberJS(sumD)}</td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+        `;
+        contentDiv.innerHTML = html;
+        
+    } catch (e) {
+        alert(e.message);
+        renderGlavnaKnjiga();
+    }
+}
+
+async function showDodajTemeljnico() {
+    const leto = getLeto();
+    let html = `
+        <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-top: 4px solid var(--primary-blue);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                <h3 style="margin:0; color:var(--primary-blue);">Nova ročna temeljnica</h3>
+                <button class="btn" onclick="renderGlavnaKnjiga()">Nazaj</button>
+            </div>
+            
+            <form id="frm-temeljnica" onsubmit="shraniTemeljnico(event)">
+                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:15px; margin-bottom:20px;">
+                    <div class="form-group">
+                        <label>Številka temeljnice *</label>
+                        <input type="text" id="t_stevilka" value="ROČ-${leto}-001" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Datum *</label>
+                        <input type="date" id="t_datum" value="${new Date().toISOString().split('T')[0]}" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Vrsta</label>
+                        <input type="text" id="t_vrsta" value="ROC" readonly style="background:#e9ecef;">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Opis temeljnice</label>
+                    <input type="text" id="t_opis">
+                </div>
+                
+                <h4 style="margin-top:30px; margin-bottom:15px; border-bottom:1px solid #eee; padding-bottom:10px;">Postavke</h4>
+                <div id="t-postavke-container"></div>
+                <button type="button" class="btn" style="margin-top:10px; background:#f1f3f5; color:#333;" onclick="dodajTemeljnicaPostavko()">+ Dodaj postavko</button>
+                
+                <div style="margin-top:30px; padding-top:20px; border-top:1px solid #eee; display:flex; justify-content:flex-end; gap:15px;">
+                    <button type="button" class="btn" onclick="renderGlavnaKnjiga()" style="background:#eee; color:#333;">Prekliči</button>
+                    <button type="submit" class="btn btn-blue">Shrani temeljnico</button>
+                </div>
+            </form>
+        </div>
+    `;
+    
+    contentDiv.innerHTML = html;
+    
+    // Dodamo prvi dve prazni postavki (V breme in V dobro)
+    window._t_postavke = [];
+    dodajTemeljnicaPostavko();
+    dodajTemeljnicaPostavko();
+}
+
+function dodajTemeljnicaPostavko() {
+    const idx = window._t_postavke.length;
+    window._t_postavke.push({ id: Date.now() + Math.random() });
+    osveziTemeljnicaPostavkeUI();
+}
+
+function odstraniTemeljnicaPostavko(idx) {
+    window._t_postavke.splice(idx, 1);
+    osveziTemeljnicaPostavkeUI();
+}
+
+function osveziTemeljnicaPostavkeUI() {
+    const cont = document.getElementById('t-postavke-container');
+    if (!cont) return;
+    
+    let html = `
+        <table class="tbl-dash" style="width:100%; border:1px solid #dee2e6;">
+            <thead style="background:#f8f9fa;">
+                <tr>
+                    <th width="120">Konto</th>
+                    <th>Opis (opcijsko)</th>
+                    <th width="120">V breme</th>
+                    <th width="120">V dobro</th>
+                    <th width="40"></th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+    
+    window._t_postavke.forEach((p, i) => {
+        html += `
+            <tr>
+                <td>
+                    <input type="text" list="konti-datalist" id="tp_konto_${i}" class="tp-input" placeholder="000" required style="width:100%; padding:6px;">
+                </td>
+                <td>
+                    <input type="text" id="tp_opis_${i}" class="tp-input" style="width:100%; padding:6px;">
+                </td>
+                <td>
+                    <input type="number" step="0.01" id="tp_breme_${i}" class="tp-input tp-znesek" style="width:100%; padding:6px; text-align:right;" onchange="this.value=(parseFloat(this.value)||0)>0?this.value:''; if(this.value) document.getElementById('tp_dobro_${i}').value=''; izracunajSaldoTemeljnice();">
+                </td>
+                <td>
+                    <input type="number" step="0.01" id="tp_dobro_${i}" class="tp-input tp-znesek" style="width:100%; padding:6px; text-align:right;" onchange="this.value=(parseFloat(this.value)||0)>0?this.value:''; if(this.value) document.getElementById('tp_breme_${i}').value=''; izracunajSaldoTemeljnice();">
+                </td>
+                <td style="text-align:center;">
+                    <button type="button" class="icon-btn btn-red" onclick="odstraniTemeljnicaPostavko(${i})" tabindex="-1">✕</button>
+                </td>
+            </tr>
+        `;
+    });
+    
+    html += `
+            </tbody>
+            <tfoot>
+                <tr style="background:#f8f9fa; font-weight:bold;">
+                    <td colspan="2" style="text-align:right;">SKUPAJ:</td>
+                    <td id="tp_sum_breme" style="text-align:right;">0.00</td>
+                    <td id="tp_sum_dobro" style="text-align:right;">0.00</td>
+                    <td></td>
+                </tr>
+                <tr>
+                    <td colspan="5" id="tp_saldo_msg" style="text-align:center; padding:10px; font-weight:bold; color:#e03131;">Temeljnica ni usklajena!</td>
+                </tr>
+            </tfoot>
+        </table>
+        <style>
+            .tp-input { border: 1px solid #ced4da; border-radius: 4px; box-sizing: border-box; }
+            .tp-input:focus { border-color: var(--primary-blue); outline: none; }
+        </style>
+    `;
+    
+    cont.innerHTML = html;
+    izracunajSaldoTemeljnice();
+}
+
+function izracunajSaldoTemeljnice() {
+    let sB = 0, sD = 0;
+    window._t_postavke.forEach((_, i) => {
+        const b = parseFloat(document.getElementById(`tp_breme_${i}`)?.value) || 0;
+        const d = parseFloat(document.getElementById(`tp_dobro_${i}`)?.value) || 0;
+        sB += b;
+        sD += d;
+    });
+    
+    const elSumB = document.getElementById('tp_sum_breme');
+    const elSumD = document.getElementById('tp_sum_dobro');
+    const msg = document.getElementById('tp_saldo_msg');
+    
+    if (elSumB) elSumB.textContent = sB.toFixed(2);
+    if (elSumD) elSumD.textContent = sD.toFixed(2);
+    
+    if (msg) {
+        if (Math.abs(sB - sD) < 0.01 && sB > 0) {
+            msg.textContent = "Temeljnica je usklajena ✓";
+            msg.style.color = "#2b8a3e";
+        } else {
+            msg.textContent = "Temeljnica ni usklajena ali je prazna!";
+            msg.style.color = "#e03131";
+        }
+    }
+}
+
+async function shraniTemeljnico(e) {
+    e.preventDefault();
+    
+    let sB = 0, sD = 0;
+    let postavke = [];
+    
+    for (let i = 0; i < window._t_postavke.length; i++) {
+        const k = document.getElementById(`tp_konto_${i}`).value;
+        const op = document.getElementById(`tp_opis_${i}`).value;
+        const b = parseFloat(document.getElementById(`tp_breme_${i}`).value) || 0;
+        const d = parseFloat(document.getElementById(`tp_dobro_${i}`).value) || 0;
+        
+        if (k && (b > 0 || d > 0)) {
+            postavke.push({ konto: k, opis: op, znesek_v_breme: b, znesek_v_dobro: d });
+            sB += b;
+            sD += d;
+        }
+    }
+    
+    if (postavke.length === 0) {
+        alert("Dodajte vsaj eno veljavno postavko!");
+        return;
+    }
+    if (Math.abs(sB - sD) >= 0.01) {
+        alert("Zneski v breme in v dobro morajo biti usklajeni (enaki)!");
+        return;
+    }
+    
+    const data = {
+        poslovno_leto: getLeto(),
+        vrsta: document.getElementById('t_vrsta').value,
+        stevilka: document.getElementById('t_stevilka').value,
+        datum: document.getElementById('t_datum').value,
+        opis: document.getElementById('t_opis').value,
+        postavke: postavke
+    };
+    
+    try {
+        const res = await fetch('/api/temeljnice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        
+        if (res.ok) {
+            renderGlavnaKnjiga();
+        } else {
+            const err = await res.json();
+            alert("Napaka pri shranjevanju: " + err.detail);
+        }
+    } catch(err) { alert("Napaka komunikacije s strežnikom"); }
+}
+
+async function brisiTemeljnico(id, isLocked) {
+    if (isLocked) {
+        alert("Avtomatsko ustvarjenih temeljnic ni mogoče ročno brisati. Izbrišite ali razknjižite izvorni dokument (račun, izpisek).");
+        return;
+    }
+    if (!confirm("Ste prepričani, da želite izbrisati to ročno temeljnico?")) return;
+    
+    try {
+        const res = await fetch(`/api/temeljnice/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+            renderGlavnaKnjiga();
+        } else {
+            const err = await res.json();
+            alert(err.detail);
+        }
+    } catch(e) { alert("Napaka komunikacije s strežnikom."); }
+}
 

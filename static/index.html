@@ -134,6 +134,7 @@
 
             <div style="padding: 15px 20px 5px 20px; font-size: 0.75rem; color: var(--text-muted); text-transform:uppercase; font-weight:bold;">Finance</div>
             <a href="#" onclick="showModule('izpiski')">Bančni izpiski</a>
+            <a href="#" onclick="showModule('glavna_knjiga')">Glavna knjiga</a>
             
             <div style="padding: 15px 20px 5px 20px; font-size: 0.75rem; color: var(--text-muted); text-transform:uppercase; font-weight:bold;">Zaposleni</div>
             <a href="#" onclick="showModule('zaposleni')">Seznam zaposlenih</a>
@@ -207,6 +208,33 @@
             <div style="margin-top:15px; padding-top:15px; border-top:1px solid #eee; display:flex; gap:10px; justify-content:flex-end;">
                 <button class="btn" style="background:#eee; color:#333;" onclick="window.zapriPartnerPopup()">Prekliči</button>
                 <button class="btn btn-blue" onclick="window.shraniPartnerPopup()">Shrani partnerja</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Izbira temeljnice ob knjiženju -->
+    <div id="temeljnica-popup-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:10000; align-items:center; justify-content:center;">
+        <div style="background:white; padding:25px; border-radius:12px; width:480px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);">
+            <h3 style="margin-top:0; color:var(--primary-blue); font-size:1.2rem; border-bottom:1px solid #eee; padding-bottom:10px;">Izbira temeljnice</h3>
+            
+            <p style="font-size:0.9rem; color:#555; margin-bottom:15px;">Izberite obstoječo temeljnico za to poslovno leto, ali ustvarite novo.</p>
+            
+            <div class="form-group">
+                <label>Temeljnica</label>
+                <select id="tp_izbira_temeljnice" style="width:100%; padding:8px; border:1px solid #ced4da; border-radius:4px;" onchange="window.onTemeljnicaSelectChange()">
+                    <option value="-1">-- Ustvari NOVO temeljnico --</option>
+                    <!-- dinamicno napolnjeno iz baze -->
+                </select>
+            </div>
+
+            <div id="tp_novi_naziv_wrapper" class="form-group" style="margin-top:10px;">
+                <label>Naziv nove temeljnice</label>
+                <input type="text" id="tp_novi_naziv" placeholder="npr. Prejeti računi jan 2025" style="width:100%; padding:8px; border:1px solid #ced4da; border-radius:4px; box-sizing:border-box;">
+            </div>
+
+            <div style="margin-top:20px; border-top:1px solid #eee; padding-top:15px; display:flex; justify-content:flex-end; gap:10px;">
+                <button class="btn" style="background:#eee; color:#333;" onclick="window.zapriTemeljnicaPopup()">Prekliči</button>
+                <button class="btn btn-blue" onclick="window.potrdiTemeljnicaPopup()">Potrdi in knjiži</button>
             </div>
         </div>
     </div>
