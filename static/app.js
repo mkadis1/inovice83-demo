@@ -203,7 +203,7 @@ async function izvediBulkKnjizenje(akcija, temeljnica_id, novi_naziv) {
             } else if (mod === 'place') {
                 renderPlace();
             } else {
-                window.refreshCurrentModule();
+                window.refreshCurrentModule(mod);
             }
         } else {
             alert("Napaka pri skupinskem knjiženju.");
@@ -247,12 +247,10 @@ async function izvediKnjiziPosamezen(id, akcija, temeljnica_id, novi_naziv, tip)
             if (['izdani_racuni', 'prejeti_racuni', 'ponudbe', 'dobropisi'].includes(activeModule)) {
                 const titles = { 'izdani_racuni': 'Izdani računi', 'prejeti_racuni': 'Prejeti računi', 'ponudbe': 'Ponudbe', 'dobropisi': 'Dobropisi' };
                 renderDokumenti(activeModule, titles[activeModule]);
-            } else if (activeModule === 'izpiski') {
-                renderIzpiski();
-            } else if (activeModule === 'potni_nalogi') {
-                renderPotniNalogi();
+            } else if (activeModule === 'place') {
+                renderPlace();
             } else {
-                window.refreshCurrentModule();
+                window.refreshCurrentModule(activeModule);
             }
         } else {
             const err = await res.json();
@@ -312,8 +310,8 @@ window.potrdiTemeljnicaPopup = function() {
     }
 };
 
-window.refreshCurrentModule = function() {
-    const mod = window.appSelection.module;
+window.refreshCurrentModule = function(moduleOverride = null) {
+    const mod = moduleOverride || window.appSelection.module;
     if (mod === 'partnerji') renderPartnerji();
     else if (mod === 'izpiski') renderIzpiski();
     else if (mod === 'zaposleni') renderZaposleni();
